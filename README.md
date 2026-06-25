@@ -38,6 +38,23 @@ GET /api/roi?capacity_kwh=1000&power_kw=500&capex_per_kwh=1150&vpp=true
 GET /api/audit
 ```
 
+## Deploy To Vercel With Neon
+
+The project is configured for Vercel production deployments:
+
+- `api/index.py` is the Vercel Python function entrypoint.
+- `vercel.json` runs `python scripts/migrate.py` during the Vercel build.
+- `scripts/migrate.py` reads `DATABASE_URL` and applies SQL files from `migrations/`.
+- `migrations/001_init.sql` creates the `chargeopt` schema and core Enterprise tables idempotently.
+
+After linking this repo to a Vercel Git project, every Git-triggered deployment will run the migration before publishing the app. Set `DATABASE_URL` in Vercel for Production, Preview, and Development. Do not commit real database URLs; use `.env.example` as the local template.
+
+Current production URL:
+
+```text
+https://chargeopt-os.vercel.app
+```
+
 ## Next Milestones
 
 1. Replace in-memory fixtures with PostgreSQL/TimescaleDB repositories.

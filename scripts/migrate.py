@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import psycopg
-
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "migrations"
@@ -17,6 +15,8 @@ def main() -> None:
             print("Skipping database migration because CHARGEOPT_SKIP_DB_MIGRATION=1.")
             return
         raise SystemExit("DATABASE_URL is required to run ChargeOpt database migrations.")
+
+    import psycopg
 
     with psycopg.connect(database_url, autocommit=True) as connection:
         with connection.cursor() as cursor:

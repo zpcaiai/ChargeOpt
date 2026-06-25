@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS chargeopt.dispatch_recommendations (
     risk text NOT NULL,
     action text NOT NULL,
     value numeric(14, 3) NOT NULL,
-    window text NOT NULL,
+    dispatch_window text NOT NULL,
     mode text NOT NULL,
     approval text NOT NULL,
     rationale text NOT NULL,

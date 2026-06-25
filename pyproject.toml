@@ -3,7 +3,9 @@ name = "chargeopt"
 version = "0.1.0"
 description = "ChargeOpt OS Enterprise MVP for multi-station charging energy dispatch and VPP optimization."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "psycopg[binary]>=3.2,<4",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
