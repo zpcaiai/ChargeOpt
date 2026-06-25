@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChargeOpt OS</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">CO</span>
+          <div>
+            <strong>ChargeOpt OS</strong>
+            <span>Enterprise</span>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-view="cockpit" title="Operating cockpit"><span>⌁</span><b>Cockpit</b></button>
+          <button class="nav-item" data-view="station" title="Station detail"><span>▦</span><b>Station</b></button>
+          <button class="nav-item" data-view="dispatch" title="Dispatch center"><span>⇄</span><b>Dispatch</b></button>
+          <button class="nav-item" data-view="roi" title="Storage ROI simulator"><span>◍</span><b>ROI</b></button>
+          <button class="nav-item" data-view="vpp" title="VPP resources"><span>◇</span><b>VPP</b></button>
+        </nav>
+        <div class="mode-panel">
+          <span>Control Mode</span>
+          <strong>Recommendation</strong>
+          <small>Approval required</small>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>Energy Dispatch Operations</h1>
+            <p id="tenantLine">Loading portfolio...</p>
+          </div>
+          <div class="top-actions">
+            <select id="stationSelect" aria-label="Select station"></select>
+            <button id="refreshButton" class="icon-button" title="Refresh data">↻</button>
+          </div>
+        </header>
+
+        <section id="cockpit" class="view active">
+          <div class="metric-grid">
+            <article class="metric"><span>Portfolio Health</span><strong id="mHealth">--</strong><small>score</small></article>
+            <article class="metric"><span>Today Revenue</span><strong id="mRevenue">--</strong><small>CNY</small></article>
+            <article class="metric"><span>Gross Margin</span><strong id="mMargin">--</strong><small id="mMarginRate">--</small></article>
+            <article class="metric"><span>Current Power</span><strong id="mPower">--</strong><small>kW import</small></article>
+            <article class="metric"><span>Queue</span><strong id="mQueue">--</strong><small>vehicles</small></article>
+            <article class="metric"><span>VPP Capacity</span><strong id="mVpp">--</strong><small>reliable kW</small></article>
+          </div>
+
+          <div class="layout two-one">
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2>Portfolio Load</h2><p>Grid import, PV, storage action, and queue pressure</p></div>
+                <span id="generatedAt" class="status-pill">--</span>
+              </div>
+              <div id="portfolioChart" class="chart tall"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2>Savings Potential</h2><p>Monthly value from peak control, storage, and queue relief</p></div>
+              </div>
+              <div id="savingsBars" class="bar-stack"></div>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div><h2>Station Portfolio</h2><p>Economic health, utilization, storage state, and VPP readiness</p></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Station</th>
+                    <th>Health</th>
+                    <th>Power</th>
+                    <th>Peak</th>
+                    <th>Storage</th>
+                    <th>Utilization</th>
+                    <th>Margin</th>
+                    <th>VPP</th>
+                  </tr>
+                </thead>
+                <tbody id="stationRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="station" class="view">
+          <div class="layout station-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2 id="stationName">Station</h2><p id="stationMeta">--</p></div>
+                <span id="stationMode" class="status-pill">--</span>
+              </div>
+              <div class="metric-grid compact">
+                <article class="metric"><span>SOC</span><strong id="sSoc">--</strong><small>storage</small></article>
+                <article class="metric"><span>Headroom</span><strong id="sHeadroom">--</strong><small>kW</small></article>
+                <article class="metric"><span>Queue</span><strong id="sQueue">--</strong><small>vehicles</small></article>
+                <article class="metric"><span>Margin</span><strong id="sMargin">--</strong><small>today</small></article>
+              </div>
+              <div id="stationChart" class="chart"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2>Alerts</h2><p>Open issues and acknowledged operating events</p></div></div>
+              <div id="alertList" class="event-list"></div>
+            </section>
+          </div>
+
+          <div class="layout two-one">
+            <section class="panel">
+              <div class="panel-head"><div><h2>24h Forecast</h2><p>Load, queue, price, and peak probability</p></div></div>
+              <div id="forecastChart" class="chart"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2>Dynamic Pricing</h2><p>Recommended public service-fee adjustment</p></div></div>
+              <div id="pricingList" class="event-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="dispatch" class="view">
+          <div class="layout dispatch-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2>Dispatch Queue</h2><p>Auditable recommendations before any control action</p></div>
+                <span id="dispatchSummary" class="status-pill">--</span>
+              </div>
+              <div id="dispatchList" class="dispatch-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2>Storage Plan</h2><p>Rolling plan for selected station</p></div></div>
+              <div id="storagePlan" class="plan-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="roi" class="view">
+          <div class="layout roi-layout">
+            <section class="panel">
+              <div class="panel-head"><div><h2>Storage ROI Simulator</h2><p>Capacity, PCS power, CAPEX, and VPP revenue case</p></div></div>
+              <div class="controls">
+                <label>Capacity kWh <input id="capacityInput" type="number" min="300" max="5000" step="100" value="1200" /></label>
+                <label>PCS power kW <input id="powerInput" type="number" min="100" max="2500" step="50" value="600" /></label>
+                <label>CAPEX CNY/kWh <input id="capexInput" type="number" min="700" max="2200" step="50" value="1150" /></label>
+                <label class="toggle"><input id="vppInput" type="checkbox" checked /> VPP revenue</label>
+              </div>
+            </section>
+            <section class="panel result-panel">
+              <div class="panel-head"><div><h2>Investment Case</h2><p id="roiDecision">--</p></div></div>
+              <div class="metric-grid compact">
+                <article class="metric"><span>CAPEX</span><strong id="rCapex">--</strong><small>CNY</small></article>
+                <article class="metric"><span>Net Benefit</span><strong id="rBenefit">--</strong><small>CNY/year</small></article>
+                <article class="metric"><span>Payback</span><strong id="rPayback">--</strong><small>years</small></article>
+                <article class="metric"><span>IRR</span><strong id="rIrr">--</strong><small>10y estimate</small></article>
+              </div>
+              <div id="roiBars" class="bar-stack"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="vpp" class="view">
+          <div class="layout two-one">
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2>Demand Response Event</h2><p id="vppEvent">--</p></div>
+                <span id="vppStatus" class="status-pill">--</span>
+              </div>
+              <div class="metric-grid compact">
+                <article class="metric"><span>Reliable Capacity</span><strong id="vReliable">--</strong><small>kW</small></article>
+                <article class="metric"><span>Requested</span><strong id="vRequested">--</strong><small>kW</small></article>
+                <article class="metric"><span>Revenue</span><strong id="vRevenue">--</strong><small>CNY</small></article>
+                <article class="metric"><span>Resources</span><strong id="vResources">--</strong><small>stations</small></article>
+              </div>
+              <div id="vppAllocations" class="dispatch-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2>Resource Pool</h2><p>Storage availability, load curtailment, confidence, and cost</p></div></div>
+              <div id="vppResources" class="event-list"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
