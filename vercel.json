@@ -1,6 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "python scripts/migrate.py",
+  "env": {
+    "CHARGEOPT_SKIP_DB_MIGRATION": "1"
+  },
+  "installCommand": "pip install -r requirements-vercel.txt",
   "routes": [
     {
       "src": "/api/(.*)",

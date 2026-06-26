@@ -1,8 +1,10 @@
 """Vercel Python serverless entrypoint.
 
-Vercel expects either a BaseHTTPRequestHandler subclass named ``handler``
-or an ASGI/WSGI callable.  We expose the FastAPI ``app`` object directly;
-Vercel's Python runtime detects ASGI apps automatically when the symbol is
-named ``app``.
+Vercel expects an ASGI callable named ``app``.  We create a fresh app
+instance here; the lifespan (DB pool init/close) does not fire in
+serverless — the app automatically falls back to in-memory fixtures
+when DATABASE_URL is not set.
 """
-from chargeopt.app import app  # noqa: F401  – re-exported for Vercel
+from chargeopt.app import create_app
+
+app = create_app()

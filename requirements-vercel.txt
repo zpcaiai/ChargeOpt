@@ -1,0 +1,6 @@
+fastapi>=0.111,<1
+pydantic-settings>=2.3,<3
+psycopg>=3.2,<4
+structlog>=24.1,<25
+prometheus-client>=0.20,<1
+slowapi>=0.1.9,<1
