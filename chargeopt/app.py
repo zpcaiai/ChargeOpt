@@ -77,7 +77,7 @@ limiter = Limiter(key_func=get_remote_address)
 # ---------------------------------------------------------------------------
 
 
-def create_app() -> FastAPI:
+def create_app(use_lifespan: bool = True) -> FastAPI:
     s = get_settings()
     configure_logging(
         log_level=s.log_level,
@@ -95,7 +95,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=s.app_name,
         version=s.app_version,
-        lifespan=_lifespan,
+        lifespan=_lifespan if use_lifespan else None,
         docs_url="/docs" if not s.is_production else None,
         redoc_url="/redoc" if not s.is_production else None,
         openapi_url="/openapi.json" if not s.is_production else None,

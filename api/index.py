@@ -25,7 +25,7 @@ async def app(scope, receive, send):  # replaced below on success; fallback if b
 try:
     from chargeopt.app import create_app
 
-    app = create_app()  # type: ignore[misc]
+    app = create_app(use_lifespan=False)  # type: ignore[misc]
 
 except Exception:
     _boot_tb = traceback.format_exc()
