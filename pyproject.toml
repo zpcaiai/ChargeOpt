@@ -44,7 +44,7 @@ source = ["chargeopt"]
 omit = ["chargeopt/server.py"]
 
 [tool.vercel]
-entrypoint = "main.py:app"
+entrypoint = "api.index:app"
 
 [tool.vercel.scripts]
 build = ""
