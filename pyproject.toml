@@ -5,18 +5,21 @@ description = "ChargeOpt OS Enterprise – multi-station charging energy dispatc
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.111,<1",
-  "uvicorn[standard]>=0.29,<1",
   "pydantic-settings>=2.3,<3",
-  "psycopg[binary,pool]>=3.2,<4",
   "structlog>=24.1,<25",
   "prometheus-client>=0.20,<1",
   "slowapi>=0.1.9,<1",
+  "aiofiles>=23.0,<25",
 ]
 
 [project.scripts]
 chargeopt = "chargeopt.__main__:main"
 
 [project.optional-dependencies]
+db = [
+  "uvicorn[standard]>=0.29,<1",
+  "psycopg[binary,pool]>=3.2,<4",
+]
 dev = [
   "pytest>=8.2,<9",
   "pytest-cov>=5.0,<6",
