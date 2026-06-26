@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ChargeOpt OS</title>
+    <meta name="description" content="ChargeOpt OS – Energy Dispatch Operations" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -17,52 +18,53 @@
           </div>
         </div>
         <nav class="nav">
-          <button class="nav-item active" data-view="cockpit" title="Operating cockpit"><span>⌁</span><b>Cockpit</b></button>
-          <button class="nav-item" data-view="station" title="Station detail"><span>▦</span><b>Station</b></button>
-          <button class="nav-item" data-view="dispatch" title="Dispatch center"><span>⇄</span><b>Dispatch</b></button>
-          <button class="nav-item" data-view="roi" title="Storage ROI simulator"><span>◍</span><b>ROI</b></button>
-          <button class="nav-item" data-view="vpp" title="VPP resources"><span>◇</span><b>VPP</b></button>
+          <button class="nav-item active" data-view="cockpit" data-i18n-title="nav.cockpit.title"><span>⌁</span><b data-i18n="nav.cockpit">驾驶舱</b></button>
+          <button class="nav-item" data-view="station" data-i18n-title="nav.station.title"><span>▦</span><b data-i18n="nav.station">站点</b></button>
+          <button class="nav-item" data-view="dispatch" data-i18n-title="nav.dispatch.title"><span>⇄</span><b data-i18n="nav.dispatch">调度</b></button>
+          <button class="nav-item" data-view="roi" data-i18n-title="nav.roi.title"><span>◍</span><b data-i18n="nav.roi">ROI</b></button>
+          <button class="nav-item" data-view="vpp" data-i18n-title="nav.vpp.title"><span>◇</span><b data-i18n="nav.vpp">VPP</b></button>
         </nav>
         <div class="mode-panel">
-          <span>Control Mode</span>
-          <strong>Recommendation</strong>
-          <small>Approval required</small>
+          <span data-i18n="mode.label">控制模式</span>
+          <strong data-i18n="mode.value">建议模式</strong>
+          <small data-i18n="mode.hint">需人工审批</small>
         </div>
       </aside>
 
       <main class="workspace">
         <header class="topbar">
           <div>
-            <h1>Energy Dispatch Operations</h1>
-            <p id="tenantLine">Loading portfolio...</p>
+            <h1 data-i18n="header.title">能源调度运营中心</h1>
+            <p id="tenantLine" data-i18n="header.loading">加载中...</p>
           </div>
           <div class="top-actions">
             <select id="stationSelect" aria-label="Select station"></select>
-            <button id="refreshButton" class="icon-button" title="Refresh data">↻</button>
+            <button id="langToggle" class="icon-button lang-toggle" title="Switch language">EN</button>
+            <button id="refreshButton" class="icon-button" data-i18n-title="btn.refresh">↻</button>
           </div>
         </header>
 
         <section id="cockpit" class="view active">
           <div class="metric-grid">
-            <article class="metric"><span>Portfolio Health</span><strong id="mHealth">--</strong><small>score</small></article>
-            <article class="metric"><span>Today Revenue</span><strong id="mRevenue">--</strong><small>CNY</small></article>
-            <article class="metric"><span>Gross Margin</span><strong id="mMargin">--</strong><small id="mMarginRate">--</small></article>
-            <article class="metric"><span>Current Power</span><strong id="mPower">--</strong><small>kW import</small></article>
-            <article class="metric"><span>Queue</span><strong id="mQueue">--</strong><small>vehicles</small></article>
-            <article class="metric"><span>VPP Capacity</span><strong id="mVpp">--</strong><small>reliable kW</small></article>
+            <article class="metric"><span data-i18n="metric.health">组合健康度</span><strong id="mHealth">--</strong><small data-i18n="metric.health.unit">评分</small></article>
+            <article class="metric"><span data-i18n="metric.revenue">今日收入</span><strong id="mRevenue">--</strong><small>CNY</small></article>
+            <article class="metric"><span data-i18n="metric.margin">毛利润</span><strong id="mMargin">--</strong><small id="mMarginRate">--</small></article>
+            <article class="metric"><span data-i18n="metric.power">当前功率</span><strong id="mPower">--</strong><small data-i18n="metric.power.unit">kW 从电网</small></article>
+            <article class="metric"><span data-i18n="metric.queue">排队</span><strong id="mQueue">--</strong><small data-i18n="metric.queue.unit">辆</small></article>
+            <article class="metric"><span data-i18n="metric.vpp">VPP 容量</span><strong id="mVpp">--</strong><small data-i18n="metric.vpp.unit">可靠 kW</small></article>
           </div>
 
           <div class="layout two-one">
             <section class="panel">
               <div class="panel-head">
-                <div><h2>Portfolio Load</h2><p>Grid import, PV, storage action, and queue pressure</p></div>
+                <div><h2 data-i18n="panel.portfolioLoad">组合负荷</h2><p data-i18n="panel.portfolioLoad.desc">电网进口、光伏、储能动作及排队压力</p></div>
                 <span id="generatedAt" class="status-pill">--</span>
               </div>
               <div id="portfolioChart" class="chart tall"></div>
             </section>
             <section class="panel">
               <div class="panel-head">
-                <div><h2>Savings Potential</h2><p>Monthly value from peak control, storage, and queue relief</p></div>
+                <div><h2 data-i18n="panel.savings">节省潜力</h2><p data-i18n="panel.savings.desc">来自削峰、储能及排队缓解的月度价值</p></div>
               </div>
               <div id="savingsBars" class="bar-stack"></div>
             </section>
@@ -70,20 +72,20 @@
 
           <section class="panel">
             <div class="panel-head">
-              <div><h2>Station Portfolio</h2><p>Economic health, utilization, storage state, and VPP readiness</p></div>
+              <div><h2 data-i18n="panel.stationPortfolio">站点组合</h2><p data-i18n="panel.stationPortfolio.desc">经济健康、利用率、储能状态及VPP就绪度</p></div>
             </div>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Station</th>
-                    <th>Health</th>
-                    <th>Power</th>
-                    <th>Peak</th>
-                    <th>Storage</th>
-                    <th>Utilization</th>
-                    <th>Margin</th>
-                    <th>VPP</th>
+                    <th data-i18n="th.station">站点</th>
+                    <th data-i18n="th.health">健康度</th>
+                    <th data-i18n="th.power">功率</th>
+                    <th data-i18n="th.peak">峰值</th>
+                    <th data-i18n="th.storage">储能</th>
+                    <th data-i18n="th.utilization">利用率</th>
+                    <th data-i18n="th.margin">利润</th>
+                    <th data-i18n="th.vpp">VPP</th>
                   </tr>
                 </thead>
                 <tbody id="stationRows"></tbody>
@@ -100,26 +102,26 @@
                 <span id="stationMode" class="status-pill">--</span>
               </div>
               <div class="metric-grid compact">
-                <article class="metric"><span>SOC</span><strong id="sSoc">--</strong><small>storage</small></article>
-                <article class="metric"><span>Headroom</span><strong id="sHeadroom">--</strong><small>kW</small></article>
-                <article class="metric"><span>Queue</span><strong id="sQueue">--</strong><small>vehicles</small></article>
-                <article class="metric"><span>Margin</span><strong id="sMargin">--</strong><small>today</small></article>
+                <article class="metric"><span>SOC</span><strong id="sSoc">--</strong><small data-i18n="metric.storage">储能</small></article>
+                <article class="metric"><span data-i18n="metric.headroom">余量</span><strong id="sHeadroom">--</strong><small>kW</small></article>
+                <article class="metric"><span data-i18n="metric.queue">排队</span><strong id="sQueue">--</strong><small data-i18n="metric.queue.unit">辆</small></article>
+                <article class="metric"><span data-i18n="metric.margin">毛利润</span><strong id="sMargin">--</strong><small data-i18n="metric.today">今日</small></article>
               </div>
               <div id="stationChart" class="chart"></div>
             </section>
             <section class="panel">
-              <div class="panel-head"><div><h2>Alerts</h2><p>Open issues and acknowledged operating events</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.alerts">告警</h2><p data-i18n="panel.alerts.desc">未处理及已确认的运行事件</p></div></div>
               <div id="alertList" class="event-list"></div>
             </section>
           </div>
 
           <div class="layout two-one">
             <section class="panel">
-              <div class="panel-head"><div><h2>24h Forecast</h2><p>Load, queue, price, and peak probability</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.forecast">24小时预测</h2><p data-i18n="panel.forecast.desc">负荷、排队、电价及峰值概率</p></div></div>
               <div id="forecastChart" class="chart"></div>
             </section>
             <section class="panel">
-              <div class="panel-head"><div><h2>Dynamic Pricing</h2><p>Recommended public service-fee adjustment</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.pricing">动态定价</h2><p data-i18n="panel.pricing.desc">推荐的公共服务费调整</p></div></div>
               <div id="pricingList" class="event-list"></div>
             </section>
           </div>
@@ -129,13 +131,13 @@
           <div class="layout dispatch-layout">
             <section class="panel">
               <div class="panel-head">
-                <div><h2>Dispatch Queue</h2><p>Auditable recommendations before any control action</p></div>
+                <div><h2 data-i18n="panel.dispatchQueue">调度队列</h2><p data-i18n="panel.dispatchQueue.desc">控制动作前的可审计建议</p></div>
                 <span id="dispatchSummary" class="status-pill">--</span>
               </div>
               <div id="dispatchList" class="dispatch-list"></div>
             </section>
             <section class="panel">
-              <div class="panel-head"><div><h2>Storage Plan</h2><p>Rolling plan for selected station</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.storagePlan">储能计划</h2><p data-i18n="panel.storagePlan.desc">所选站点的滚动计划</p></div></div>
               <div id="storagePlan" class="plan-list"></div>
             </section>
           </div>
@@ -144,21 +146,21 @@
         <section id="roi" class="view">
           <div class="layout roi-layout">
             <section class="panel">
-              <div class="panel-head"><div><h2>Storage ROI Simulator</h2><p>Capacity, PCS power, CAPEX, and VPP revenue case</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.roi">储能ROI模拟器</h2><p data-i18n="panel.roi.desc">容量、PCS功率、CAPEX及VPP收益</p></div></div>
               <div class="controls">
-                <label>Capacity kWh <input id="capacityInput" type="number" min="300" max="5000" step="100" value="1200" /></label>
-                <label>PCS power kW <input id="powerInput" type="number" min="100" max="2500" step="50" value="600" /></label>
-                <label>CAPEX CNY/kWh <input id="capexInput" type="number" min="700" max="2200" step="50" value="1150" /></label>
-                <label class="toggle"><input id="vppInput" type="checkbox" checked /> VPP revenue</label>
+                <label><span data-i18n="roi.capacity">容量 kWh</span> <input id="capacityInput" type="number" min="300" max="5000" step="100" value="1200" /></label>
+                <label><span data-i18n="roi.power">PCS功率 kW</span> <input id="powerInput" type="number" min="100" max="2500" step="50" value="600" /></label>
+                <label><span data-i18n="roi.capex">CAPEX 元/kWh</span> <input id="capexInput" type="number" min="700" max="2200" step="50" value="1150" /></label>
+                <label class="toggle"><input id="vppInput" type="checkbox" checked /> <span data-i18n="roi.vpp">VPP收益</span></label>
               </div>
             </section>
             <section class="panel result-panel">
-              <div class="panel-head"><div><h2>Investment Case</h2><p id="roiDecision">--</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.investment">投资方案</h2><p id="roiDecision">--</p></div></div>
               <div class="metric-grid compact">
                 <article class="metric"><span>CAPEX</span><strong id="rCapex">--</strong><small>CNY</small></article>
-                <article class="metric"><span>Net Benefit</span><strong id="rBenefit">--</strong><small>CNY/year</small></article>
-                <article class="metric"><span>Payback</span><strong id="rPayback">--</strong><small>years</small></article>
-                <article class="metric"><span>IRR</span><strong id="rIrr">--</strong><small>10y estimate</small></article>
+                <article class="metric"><span data-i18n="roi.netBenefit">净收益</span><strong id="rBenefit">--</strong><small data-i18n="roi.cnyYear">元/年</small></article>
+                <article class="metric"><span data-i18n="roi.payback">回收期</span><strong id="rPayback">--</strong><small data-i18n="roi.years">年</small></article>
+                <article class="metric"><span>IRR</span><strong id="rIrr">--</strong><small data-i18n="roi.irrHint">10年估算</small></article>
               </div>
               <div id="roiBars" class="bar-stack"></div>
             </section>
@@ -169,19 +171,19 @@
           <div class="layout two-one">
             <section class="panel">
               <div class="panel-head">
-                <div><h2>Demand Response Event</h2><p id="vppEvent">--</p></div>
+                <div><h2 data-i18n="panel.drEvent">需求响应事件</h2><p id="vppEvent">--</p></div>
                 <span id="vppStatus" class="status-pill">--</span>
               </div>
               <div class="metric-grid compact">
-                <article class="metric"><span>Reliable Capacity</span><strong id="vReliable">--</strong><small>kW</small></article>
-                <article class="metric"><span>Requested</span><strong id="vRequested">--</strong><small>kW</small></article>
-                <article class="metric"><span>Revenue</span><strong id="vRevenue">--</strong><small>CNY</small></article>
-                <article class="metric"><span>Resources</span><strong id="vResources">--</strong><small>stations</small></article>
+                <article class="metric"><span data-i18n="vpp.reliable">可靠容量</span><strong id="vReliable">--</strong><small>kW</small></article>
+                <article class="metric"><span data-i18n="vpp.requested">需求量</span><strong id="vRequested">--</strong><small>kW</small></article>
+                <article class="metric"><span data-i18n="vpp.revenue">收益</span><strong id="vRevenue">--</strong><small>CNY</small></article>
+                <article class="metric"><span data-i18n="vpp.resources">资源</span><strong id="vResources">--</strong><small data-i18n="vpp.stations">站点</small></article>
               </div>
               <div id="vppAllocations" class="dispatch-list"></div>
             </section>
             <section class="panel">
-              <div class="panel-head"><div><h2>Resource Pool</h2><p>Storage availability, load curtailment, confidence, and cost</p></div></div>
+              <div class="panel-head"><div><h2 data-i18n="panel.resourcePool">资源池</h2><p data-i18n="panel.resourcePool.desc">储能可用性、负荷削减、置信度及成本</p></div></div>
               <div id="vppResources" class="event-list"></div>
             </section>
           </div>
