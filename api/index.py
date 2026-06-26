@@ -23,20 +23,9 @@ async def app(scope, receive, send):  # replaced below on success; fallback if b
 
 
 try:
-    from fastapi.responses import FileResponse
-    from fastapi.staticfiles import StaticFiles
-
     from chargeopt.app import create_app
 
     app = create_app()  # type: ignore[misc]
-
-    _static_dir = os.path.join(_ROOT, "static")
-    if os.path.isdir(_static_dir):
-        app.mount("/static", StaticFiles(directory=_static_dir), name="static")
-
-    @app.get("/", include_in_schema=False)
-    async def _root():
-        return FileResponse(os.path.join(_static_dir, "index.html"))
 
 except Exception:
     _boot_tb = traceback.format_exc()
