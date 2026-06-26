@@ -32,9 +32,7 @@ def load_repository() -> Repository:
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
     start = now - timedelta(hours=23)
 
-    tenants = (
-        Tenant("t-001", "华东超充能源集团", "Enterprise"),
-    )
+    tenants = (Tenant("t-001", "华东超充能源集团", "Enterprise"),)
     regions = (
         Region("r-sh", "上海城市群", "华东电网"),
         Region("r-js", "苏南物流走廊", "华东电网"),
@@ -159,7 +157,9 @@ def load_repository() -> Repository:
                 storage_power_kw = 0.0
             soc = min(0.92, max(0.18, soc))
             grid_kw = max(0.0, load_kw + max(storage_power_kw, 0) + min(storage_power_kw, 0) - pv_kw)
-            occupied = min(station.connector_count, max(1, round(station.connector_count * min(0.96, load_factor + 0.12))))
+            occupied = min(
+                station.connector_count, max(1, round(station.connector_count * min(0.96, load_factor + 0.12)))
+            )
             queue = max(0, round((load_factor - 0.72) * 24 + (station_index == 1) * 2))
             sessions = max(1, round(occupied * (0.58 + load_factor * 0.22)))
             energy_kwh = load_kw * 0.91
@@ -225,9 +225,30 @@ def load_repository() -> Repository:
         ),
     )
     audit = (
-        AuditEntry("au-001", now - timedelta(hours=5), "system", "forecast.generated", "tenant:t-001", "24h load forecast generated for 3 stations."),
-        AuditEntry("au-002", now - timedelta(hours=3), "operator.li", "dispatch.reviewed", "st-wg-waigaoqiao", "Approved storage reserve floor at 28% for evening VPP event."),
-        AuditEntry("au-003", now - timedelta(hours=1), "system", "roi.simulated", "st-hq-hongqiao", "Simulated 1.2MWh storage case with VPP revenue enabled."),
+        AuditEntry(
+            "au-001",
+            now - timedelta(hours=5),
+            "system",
+            "forecast.generated",
+            "tenant:t-001",
+            "24h load forecast generated for 3 stations.",
+        ),
+        AuditEntry(
+            "au-002",
+            now - timedelta(hours=3),
+            "operator.li",
+            "dispatch.reviewed",
+            "st-wg-waigaoqiao",
+            "Approved storage reserve floor at 28% for evening VPP event.",
+        ),
+        AuditEntry(
+            "au-003",
+            now - timedelta(hours=1),
+            "system",
+            "roi.simulated",
+            "st-hq-hongqiao",
+            "Simulated 1.2MWh storage case with VPP revenue enabled.",
+        ),
     )
     return Repository(tenants, regions, tariff_plans, stations, tuple(telemetry), alerts, vpp_events, audit)
 

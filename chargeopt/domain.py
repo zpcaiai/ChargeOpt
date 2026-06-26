@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-
 Priority = Literal["low", "medium", "high", "critical"]
 DispatchMode = Literal["observe", "recommend", "semi_auto", "auto"]
 

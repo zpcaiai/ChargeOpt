@@ -1,3 +1,3 @@
-"""ChargeOpt OS Enterprise MVP."""
+"""ChargeOpt OS Enterprise."""
 
-__all__ = ["analytics", "data", "domain", "server"]
+__all__ = ["analytics", "app", "config", "data", "db", "domain", "logging_config", "repository", "server"]

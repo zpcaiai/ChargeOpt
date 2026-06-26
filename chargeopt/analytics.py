@@ -54,8 +54,12 @@ def station_summary(repo: Repository, station: Station) -> dict[str, Any]:
     monthly_savings = estimate_monthly_savings(station, points, tariff)
     vpp_kw = adjustable_capacity(station, current)
     peak_cut_kw = max(0, demand_peak - station.transformer_capacity_kw * 0.78)
-    storage_utilization = abs(sum(point.storage_power_kw for point in points)) / max(1, station.storage_power_kw * len(points))
-    health_score = _health_score(margin, revenue, utilization, current.queue_length, current.alert_count, station.reliability_score)
+    storage_utilization = abs(sum(point.storage_power_kw for point in points)) / max(
+        1, station.storage_power_kw * len(points)
+    )
+    health_score = _health_score(
+        margin, revenue, utilization, current.queue_length, current.alert_count, station.reliability_score
+    )
     return {
         "id": station.id,
         "name": station.name,
@@ -104,8 +108,13 @@ def station_detail(repo: Repository, station_id: str) -> dict[str, Any]:
         "forecast": forecast_load(repo, station.id),
         "storage_plan": storage_plan(repo, station.id),
         "pricing": pricing_suggestions(repo, station.id),
-        "alerts": [alert.__dict__ | {"timestamp": alert.timestamp.isoformat(timespec="minutes")} for alert in repo.station_alerts(station.id)],
-        "recommendations": [item for item in build_dispatch(repo)["recommendations"] if item["station_id"] == station.id],
+        "alerts": [
+            alert.__dict__ | {"timestamp": alert.timestamp.isoformat(timespec="minutes")}
+            for alert in repo.station_alerts(station.id)
+        ],
+        "recommendations": [
+            item for item in build_dispatch(repo)["recommendations"] if item["station_id"] == station.id
+        ],
     }
 
 
@@ -304,7 +313,9 @@ def build_dispatch(repo: Repository) -> dict[str, Any]:
         "summary": {
             "count": len(recommendations),
             "high_risk": len([item for item in recommendations if item["risk"] in {"high", "critical"}]),
-            "estimated_daily_value": round(sum(item["value"] for item in recommendations if isinstance(item["value"], (int, float))), 0),
+            "estimated_daily_value": round(
+                sum(item["value"] for item in recommendations if isinstance(item["value"], (int, float))), 0
+            ),
         },
     }
 
@@ -314,7 +325,9 @@ def build_vpp(repo: Repository) -> dict[str, Any]:
     for station in repo.stations:
         current = repo.station_points(station.id)[-1]
         capacity = adjustable_capacity(station, current)
-        duration = max(0.25, (current.storage_soc - 0.22) * station.storage_capacity_kwh / max(1, station.storage_power_kw))
+        duration = max(
+            0.25, (current.storage_soc - 0.22) * station.storage_capacity_kwh / max(1, station.storage_power_kw)
+        )
         reliability = station.reliability_score * (0.92 if current.queue_length > 5 else 1.0)
         resources.append(
             {
@@ -370,7 +383,11 @@ def simulate_roi(
     blended_spread = 0.72
     cycles_per_year = 286
     roundtrip_efficiency = 0.88
-    demand_savings = min(power_kw * 0.62, capacity_kwh * 0.32) * mean(plan.demand_charge_per_kw_month for plan in repo.tariff_plans) * 12
+    demand_savings = (
+        min(power_kw * 0.62, capacity_kwh * 0.32)
+        * mean(plan.demand_charge_per_kw_month for plan in repo.tariff_plans)
+        * 12
+    )
     arbitrage = capacity_kwh * cycles_per_year * roundtrip_efficiency * blended_spread
     vpp_revenue = capacity_kwh * 0.18 * 70 if include_vpp else 0
     degradation = capacity_kwh * cycles_per_year * 0.055
@@ -424,7 +441,9 @@ def _station(repo: Repository, station_id: str) -> Station:
     raise KeyError(f"Unknown station_id: {station_id}")
 
 
-def _recommendation(station: Station, title: str, risk: str, action: str, value: float, window: str, rationale: str) -> dict[str, Any]:
+def _recommendation(
+    station: Station, title: str, risk: str, action: str, value: float, window: str, rationale: str
+) -> dict[str, Any]:
     return {
         "id": f"rec-{station.id}-{title.lower().replace(' ', '-')}",
         "station_id": station.id,
@@ -440,13 +459,17 @@ def _recommendation(station: Station, title: str, risk: str, action: str, value:
     }
 
 
-def _health_score(margin: float, revenue: float, utilization: float, queue: int, alerts: int, reliability: float) -> float:
+def _health_score(
+    margin: float, revenue: float, utilization: float, queue: int, alerts: int, reliability: float
+) -> float:
     margin_component = max(0, min(34, (margin / max(1, revenue) + 0.05) * 80))
     utilization_component = max(0, 26 - abs(utilization - 0.68) * 55)
     queue_component = max(0, 18 - queue * 1.8)
     reliability_component = reliability * 16
     alert_component = max(0, 6 - alerts * 3)
-    return round(margin_component + utilization_component + queue_component + reliability_component + alert_component, 1)
+    return round(
+        margin_component + utilization_component + queue_component + reliability_component + alert_component, 1
+    )
 
 
 def _irr(capex: float, annual: float) -> float:

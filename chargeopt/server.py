@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse
 from .analytics import build_dispatch, build_overview, build_vpp, simulate_roi, station_detail, station_summary
 from .data import load_repository
 
-
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
 REPO = load_repository()

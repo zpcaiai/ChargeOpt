@@ -1,64 +1,149 @@
 # ChargeOpt OS
 
-ChargeOpt OS is a runnable Enterprise MVP for ultra-fast charging, PV-storage-charging stations, and VPP aggregation workflows.
+ChargeOpt OS is a production-grade Enterprise platform for ultra-fast charging, PV-storage-charging stations, fleet depots, and VPP aggregation workflows.
 
-The first version intentionally uses only the Python standard library so it can run immediately:
+**Stack:** FastAPI · uvicorn · psycopg3 · PostgreSQL · pydantic-settings · structlog · Prometheus · Docker · GitHub Actions · Vercel
+
+## Features
 
 - Multi-tenant station and asset domain model
-- Deterministic sample telemetry for charging, storage, tariffs, queueing, alerts, and VPP resources
-- Operating cockpit with station economics, demand peaks, storage SOC, and margin
-- Station detail, 24-hour load forecast, storage dispatch plan, dynamic pricing hints, and alert triage
-- Storage ROI simulator
-- VPP resource aggregation and demand response decomposition
+- Deterministic 24 h telemetry with load, storage SOC, PV, queue, tariff, revenue
+- Operating cockpit: station economics, demand peaks, storage dispatch, margin
+- Station detail, load forecast, storage plan, dynamic pricing hints, alert triage
+- Storage ROI simulator (NPV, IRR, payback)
+- VPP resource aggregation and demand-response decomposition
 - Auditable dispatch recommendation records
+- **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
 
-## Run
+## Quick Start (in-memory, no DB)
+
+```bash
+cp .env.example .env
+pip install -r requirements.txt
+
+# Option A – uvicorn directly
+uvicorn chargeopt.app:app --reload
+
+# Option B – module entry point (respects config Workers/Host/Port)
+python -m chargeopt
+
+# Option C – CLI (after pip install -e .)
+chargeopt
+```
+
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for the interactive API.
+
+## Docker Compose (PostgreSQL)
+
+```bash
+# 1. Create secrets files (git-ignored)
+mkdir -p secrets
+echo "chargeopt_dev_password" > secrets/db_password.txt
+echo "admin_dev_password"     > secrets/pgadmin_password.txt
+
+# 2. Start all services
+docker compose up --build
+```
+
+- App: [http://localhost:8000](http://localhost:8000)
+- pgAdmin: [http://localhost:5050](http://localhost:5050) (admin@chargeopt.local / admin)
+
+## Legacy stdlib server (local demo only)
 
 ```bash
 python3 -m chargeopt.server
 ```
 
-Then open [http://127.0.0.1:8765](http://127.0.0.1:8765).
+## Configuration
+
+Copy `.env.example` to `.env` and fill in values.  Key variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENVIRONMENT` | `development` | `development` \| `staging` \| `production` |
+| `DATABASE_URL` | _(blank)_ | PostgreSQL DSN; blank = in-memory mode |
+| `API_KEY` | _(blank)_ | Shared secret for `X-API-Key` header; blank = auth disabled |
+| `CORS_ORIGINS` | `*` | Comma-separated allowed origins |
+| `RATE_LIMIT_PER_MINUTE` | `120` | Per-IP request cap |
+| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warning` \| `error` |
+| `METRICS_ENABLED` | `true` | Expose `/metrics` (Prometheus) |
+
+## Database Migrations
+
+```bash
+# Apply migrations against DATABASE_URL
+python scripts/migrate.py
+
+# Skip migrations (read-only replicas, Vercel Preview)
+CHARGEOPT_SKIP_DB_MIGRATION=1 python scripts/migrate.py
+```
+
+Migrations are idempotent SQL files in `migrations/`:
+- `001_init.sql` – schema + tables + indexes
+- `002_seed.sql` – reference data + sample records
 
 ## Test
 
 ```bash
-pytest
+pytest                          # unit + integration + coverage
+pytest -v tests/test_api.py     # HTTP layer only
+pytest --no-cov                 # skip coverage
+```
+
+Coverage gate: **≥ 70 %** (configured in `pyproject.toml`).
+
+## Lint
+
+```bash
+ruff check chargeopt/ tests/
+ruff format chargeopt/ tests/
 ```
 
 ## API
 
+All analytics routes are versioned under `/api/v1/`. Legacy `/api/*` aliases are kept for backward compatibility.
+
 ```text
-GET /api/overview
-GET /api/stations
-GET /api/stations/{station_id}
-GET /api/dispatch
-GET /api/vpp
-GET /api/roi?capacity_kwh=1000&power_kw=500&capex_per_kwh=1150&vpp=true
-GET /api/audit
+GET /health
+GET /metrics                          (Prometheus text format)
+
+GET /api/v1/overview
+GET /api/v1/stations
+GET /api/v1/stations/{station_id}
+GET /api/v1/dispatch
+GET /api/v1/vpp
+GET /api/v1/roi?capacity_kwh=1200&power_kw=600&capex_per_kwh=1150&vpp=true
+GET /api/v1/audit?limit=50&offset=0
 ```
+
+Error responses conform to **RFC 7807** (`application/problem+json`).  
+All `/api/v1/*` endpoints accept optional `X-API-Key` header when `API_KEY` is set.
+
+## CI/CD (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on every push/PR:
+
+1. **lint** – ruff check + format
+2. **test** – pytest with coverage upload to Codecov + artifact
+3. **build** – Docker image build + push to GHCR (`ghcr.io/<owner>/chargeopt`)
+4. **scan** – Trivy vulnerability scan; results uploaded to GitHub Security tab (SARIF)
+5. **deploy-vercel** – `vercel deploy --prod` on `main` (requires `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` secrets)
+
+Required GitHub secrets: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.  
+GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 
 ## Deploy To Vercel With Neon
 
-The project is configured for Vercel production deployments:
+- `api/index.py` re-exports the FastAPI `app` for Vercel's ASGI runtime.
+- `vercel.json` runs `python scripts/migrate.py` during the build step.
+- Set `DATABASE_URL` in Vercel's environment variable panel (Production / Preview / Development).
 
-- `api/index.py` is the Vercel Python function entrypoint.
-- `vercel.json` runs `python scripts/migrate.py` during the Vercel build.
-- `scripts/migrate.py` reads `DATABASE_URL` and applies SQL files from `migrations/`.
-- `migrations/001_init.sql` creates the `chargeopt` schema and core Enterprise tables idempotently.
-
-After linking this repo to a Vercel Git project, every Git-triggered deployment will run the migration before publishing the app. Set `DATABASE_URL` in Vercel for Production, Preview, and Development. Do not commit real database URLs; use `.env.example` as the local template.
-
-Current production URL:
-
-```text
-https://chargeopt-os.vercel.app
-```
+Production URL: **https://chargeopt-os.vercel.app**
 
 ## Next Milestones
 
-1. Replace in-memory fixtures with PostgreSQL/TimescaleDB repositories.
-2. Add authenticated RBAC and tenant scoping at the API boundary.
-3. Implement MQTT/OCPP/Modbus adapters behind the gateway interfaces.
-4. Persist forecast, optimization, and dispatch plan versions.
-5. Add signed command approval and edge safety checks before real device control.
+1. RBAC + tenant scoping (JWT, per-tenant row-level security).
+2. MQTT/OCPP/Modbus adapters behind gateway interfaces.
+3. Persist forecast, optimisation, and dispatch plan versions.
+4. Replace rule-based engine with MILP/MPC (CVXPY or Pyomo).
+5. Signed command approval, edge validation, local rollback, and execution receipts.
