@@ -1,28 +1,23 @@
-"""Vercel Python serverless entrypoint (built via @vercel/python).
-
-All requests route here (see vercel.json). FastAPI serves the API routes,
-the static assets under /static, and the root index.html.
-
-NOTE: a top-level `app` (FastAPI) is created FIRST so Vercel's
-@vercel/python builder can statically detect the entrypoint. We then try
-to replace it with the real application; any boot failure is surfaced as
-a JSON 500 with the full traceback instead of an opaque crash.
-"""
+"""Vercel Python serverless entrypoint (built via @vercel/python)."""
 import os
 import sys
 import traceback
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
-
 # Ensure project root is on sys.path so `chargeopt` package is importable
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# Top-level fallback app — guarantees the builder finds `app`.
-app = FastAPI()
+_BOOT_ERROR: str | None = None
+
+# Unconditional top-level assignment so @vercel/python builder detects `app`.
+# Will be replaced by the real FastAPI app if boot succeeds.
+async def app(scope, receive, send):  # type: ignore[misc]  # noqa: E302
+    pass
 
 try:
+    from fastapi import FastAPI
+    from fastapi.responses import FileResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 
     from chargeopt.app import create_app
@@ -37,12 +32,19 @@ try:
     async def _root():
         return FileResponse(os.path.join(_static_dir, "index.html"))
 
-except Exception as _boot_err:
-    _tb = traceback.format_exc()
+except Exception:
+    _BOOT_ERROR = traceback.format_exc()
 
-    @app.get("/{path:path}")
-    async def _boot_error(path: str):
-        return JSONResponse(
-            {"error": str(_boot_err), "traceback": _tb},
-            status_code=500,
-        )
+    # Minimal stdlib ASGI app — no fastapi dependency
+    async def app(scope, receive, send):  # type: ignore[misc]
+        if scope["type"] == "http":
+            body = (_BOOT_ERROR or "unknown boot error").encode()
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [
+                    [b"content-type", b"text/plain"],
+                    [b"content-length", str(len(body)).encode()],
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
