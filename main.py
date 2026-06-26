@@ -2,6 +2,17 @@
 
 Vercel looks for an `app` variable in main.py / app.py / index.py at root.
 """
-from chargeopt.app import create_app
+import traceback
 
-app = create_app()
+try:
+    from chargeopt.app import create_app
+    app = create_app()
+except Exception as _boot_err:
+    _tb = traceback.format_exc()
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+    app = FastAPI()
+
+    @app.get("/{path:path}")
+    async def _boot_error(path: str):
+        return JSONResponse({"error": str(_boot_err), "traceback": _tb}, status_code=500)
