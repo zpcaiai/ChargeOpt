@@ -354,8 +354,3 @@ def _build_v1_router(s: Any) -> APIRouter:
     return router
 
 
-# ---------------------------------------------------------------------------
-# Module-level app instance (used by uvicorn and Vercel)
-# ---------------------------------------------------------------------------
-
-app = create_app()
