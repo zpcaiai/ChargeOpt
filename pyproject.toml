@@ -42,3 +42,9 @@ ignore = ["E501"]
 [tool.coverage.run]
 source = ["chargeopt"]
 omit = ["chargeopt/server.py"]
+
+[tool.vercel]
+entrypoint = "api/index.py:app"
+
+[tool.vercel.scripts]
+build = ""
