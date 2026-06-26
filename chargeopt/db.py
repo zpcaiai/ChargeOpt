@@ -9,15 +9,17 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Generator
+from typing import TYPE_CHECKING, Any
 
-import psycopg
-from psycopg_pool import ConnectionPool
+if TYPE_CHECKING:
+    import psycopg
+    from psycopg_pool import ConnectionPool
 
 from .config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_pool: ConnectionPool | None = None
+_pool: Any | None = None
 
 
 def init_pool() -> None:
@@ -29,6 +31,7 @@ def init_pool() -> None:
         return
     if _pool is not None:
         return
+    from psycopg_pool import ConnectionPool  # lazy – requires libpq
     _pool = ConnectionPool(
         conninfo=settings.database_url,  # type: ignore[arg-type]
         min_size=settings.db_pool_min,
@@ -52,7 +55,7 @@ def close_pool() -> None:
 
 
 @contextlib.contextmanager
-def get_connection() -> Generator[psycopg.Connection, None, None]:
+def get_connection() -> Generator:
     """Yield a checked-out connection from the pool."""
     if _pool is None:
         raise RuntimeError("Connection pool is not initialised.  Call init_pool() first.")
