@@ -190,7 +190,7 @@ def load_repository() -> Repository:
             now - timedelta(hours=2),
             "high",
             "需量峰值接近阈值",
-            "18:00-19:00 grid load reached 91% of transformer capacity.",
+            "18:00-19:00 电网负荷达到变压器容量的91%。",
             False,
         ),
         Alert(
@@ -199,7 +199,7 @@ def load_repository() -> Repository:
             now - timedelta(hours=4),
             "medium",
             "重卡排队时间偏高",
-            "Queue is forecast to exceed target service level during evening peak.",
+            "预测晚高峰排队时间将超过服务目标水平。",
             False,
         ),
         Alert(
@@ -208,7 +208,7 @@ def load_repository() -> Repository:
             now - timedelta(hours=8),
             "low",
             "光伏预测偏差",
-            "PV output was 12% below forecast because of cloud cover.",
+            "因云层遮挡，光伏出力较预测低12%。",
             True,
         ),
     )
@@ -231,7 +231,7 @@ def load_repository() -> Repository:
             "system",
             "forecast.generated",
             "tenant:t-001",
-            "24h load forecast generated for 3 stations.",
+            "已为3个站点生成24小时负荷预测。",
         ),
         AuditEntry(
             "au-002",
@@ -239,7 +239,7 @@ def load_repository() -> Repository:
             "operator.li",
             "dispatch.reviewed",
             "st-wg-waigaoqiao",
-            "Approved storage reserve floor at 28% for evening VPP event.",
+            "已批准晚间VPP事件储能最低备量28%。",
         ),
         AuditEntry(
             "au-003",
@@ -247,7 +247,7 @@ def load_repository() -> Repository:
             "system",
             "roi.simulated",
             "st-hq-hongqiao",
-            "Simulated 1.2MWh storage case with VPP revenue enabled.",
+            "已完成1.2MWh储能方案含VPP收益的模拟计算。",
         ),
     )
     return Repository(tenants, regions, tariff_plans, stations, tuple(telemetry), alerts, vpp_events, audit)

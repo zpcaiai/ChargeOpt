@@ -197,17 +197,17 @@ def storage_plan(repo: Repository, station_id: str) -> list[dict[str, Any]]:
         load_ratio = row["grid_kw"] / station.transformer_capacity_kw
         action = "hold"
         power_kw = 0.0
-        reason = "Preserve SOC and transformer headroom."
+        reason = "维持SOC与变压器余量。"
         if price < 0.5 and soc < 0.86:
             action = "charge"
             power_kw = min(station.storage_power_kw, station.transformer_capacity_kw * 0.12)
             soc += power_kw / station.storage_capacity_kwh * 0.9
-            reason = "Valley price window; charge for evening peak and VPP reserve."
+            reason = "谷电时段：充电备峰，预留VPP容量。"
         elif (price > 1.0 or load_ratio > 0.78) and soc > emergency_floor + 0.08:
             action = "discharge"
             power_kw = -min(station.storage_power_kw, row["grid_kw"] * 0.2)
             soc += power_kw / station.storage_capacity_kwh / 0.9
-            reason = "Peak price or demand threshold; discharge to reduce grid import."
+            reason = "峰价或需量阈值：放电降低电网进口。"
         soc = min(0.92, max(emergency_floor, soc))
         plan.append(
             {
@@ -229,16 +229,16 @@ def pricing_suggestions(repo: Repository, station_id: str) -> list[dict[str, Any
         load_ratio = row["load_kw"] / station.transformer_capacity_kw
         if load_ratio > 0.82 or row["queue_length"] >= 5:
             adjustment = "+0.16"
-            strategy = "Peak protection"
-            note = "Raise service fee and reserve member/fleet slots."
+            strategy = "峰值保护"
+            note = "提高服务费，为会员/车队预留桩位。"
         elif row["price"] < 0.5 and load_ratio < 0.55:
             adjustment = "-0.12"
-            strategy = "Valley attraction"
-            note = "Offer off-peak coupon to lift utilization."
+            strategy = "谷期引流"
+            note = "发放低谷优惠券，提升利用率。"
         else:
             adjustment = "0.00"
-            strategy = "Hold"
-            note = "Maintain current public price."
+            strategy = "维持"
+            note = "维持当前公共服务费价格。"
         suggestions.append(
             {
                 "label": row["label"],
@@ -262,47 +262,47 @@ def build_dispatch(repo: Repository) -> dict[str, Any]:
             recommendations.append(
                 _recommendation(
                     station,
-                    "Demand peak guard",
+                    "需量峰值防控",
                     "high",
-                    "Discharge storage and cap non-priority connectors for the next peak window.",
+                    "在下一峰值窗口放电储能并限制非优先充电桩。",
                     min(station.storage_power_kw, station.transformer_capacity_kw * 0.16),
                     next_peak["label"],
-                    "Expected demand peak reduction and lower monthly capacity charge.",
+                    "预计降低需量峰值，减少月度容量费。",
                 )
             )
         if current.queue_length >= 4:
             recommendations.append(
                 _recommendation(
                     station,
-                    "Queue relief pricing",
+                    "排队缓解定价",
                     "medium",
-                    "Apply peak service fee and redirect app traffic to lower-load stations.",
+                    "启用峰值服务费，将APP流量引导至低负荷站点。",
                     current.queue_length,
-                    "now",
-                    "Protects service level without hard equipment control.",
+                    "立即",
+                    "在不强制控制设备的前提下保障服务水平。",
                 )
             )
         if current.storage_soc < 32 and repo.tariff_for(station).price_at(current.timestamp.hour) < 0.6:
             recommendations.append(
                 _recommendation(
                     station,
-                    "Storage recharge",
+                    "储能补电",
                     "medium",
-                    "Charge battery during valley period while preserving transformer headroom.",
+                    "谷电期间充电，同时保留变压器余量。",
                     station.storage_power_kw * 0.55,
-                    "now",
-                    "Builds reserve for VPP and evening discharge.",
+                    "立即",
+                    "为VPP响应和晚高峰放电储备容量。",
                 )
             )
         recommendations.append(
             _recommendation(
                 station,
-                "Next-day dispatch plan",
+                "次日调度计划",
                 "low",
-                "Publish 24h storage and pricing plan for operator approval.",
+                "发布24小时储能与定价计划，等待运营商审批。",
                 summary["monthly_savings_potential"] / 30,
-                "tomorrow",
-                "Keeps the system in recommendation mode with auditable approval.",
+                "明日",
+                "保持建议模式，确保每项操作均有审计记录。",
             )
         )
     recommendations.sort(key=lambda item: {"critical": 0, "high": 1, "medium": 2, "low": 3}[item["risk"]])
@@ -351,7 +351,7 @@ def build_vpp(repo: Repository) -> dict[str, Any]:
                 "station_id": item["station_id"],
                 "station": item["station"],
                 "target_kw": round(min(item["adjustable_kw"], event.requested_kw * share), 1),
-                "method": "storage discharge + load shaping",
+                "method": "储能放电 + 负荷整形",
             }
         )
     expected_kwh = min(event.requested_kw, total) * event.duration_minutes / 60

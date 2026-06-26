@@ -90,6 +90,23 @@ function t(key) {
   return (TRANSLATIONS[state.lang] || TRANSLATIONS.zh)[key] || key;
 }
 
+const MODE_ZH = { recommend: "建议模式", semi_auto: "半自动", auto: "全自动" };
+const MODE_EN = { recommend: "recommend", semi_auto: "semi-auto", auto: "auto" };
+const TYPE_ZH = { urban_ultrafast: "城区超充", heavy_truck_depot: "重卡仓储", pv_storage_charging: "光储充一体" };
+const TYPE_EN = { urban_ultrafast: "urban ultrafast", heavy_truck_depot: "heavy truck depot", pv_storage_charging: "PV+storage" };
+const ACTION_ZH = { hold: "持守", charge: "充电", discharge: "放电" };
+const ACTION_EN = { hold: "hold", charge: "charge", discharge: "discharge" };
+const PRIORITY_ZH = { critical: "严重", high: "高", medium: "中", low: "低" };
+const PRIORITY_EN = { critical: "critical", high: "high", medium: "medium", low: "low" };
+const APPROVAL_ZH = { required: "需审批", observe: "仅观察" };
+const APPROVAL_EN = { required: "required", observe: "observe" };
+
+function tMode(v) { return state.lang === "zh" ? (MODE_ZH[v] || v) : (MODE_EN[v] || v); }
+function tType(v) { return state.lang === "zh" ? (TYPE_ZH[v] || v) : (TYPE_EN[v] || v); }
+function tAction(v) { return state.lang === "zh" ? (ACTION_ZH[v] || v) : (ACTION_EN[v] || v); }
+function tPriority(v) { return state.lang === "zh" ? (PRIORITY_ZH[v] || v) : (PRIORITY_EN[v] || v); }
+function tApproval(v) { return state.lang === "zh" ? (APPROVAL_ZH[v] || v) : (APPROVAL_EN[v] || v); }
+
 function applyLang() {
   document.documentElement.lang = state.lang;
   document.querySelectorAll("[data-i18n]").forEach((el) => {
@@ -143,10 +160,11 @@ function renderOverview() {
   select.innerHTML = state.overview.stations.map((station) => `<option value="${station.id}">${station.name}</option>`).join("");
   select.value = state.selectedStationId;
 
+  const zh = state.lang === "zh";
   drawLineChart($("portfolioChart"), state.overview.portfolio_series, [
-    { key: "grid_kw", label: "Grid", color: "#2563eb" },
-    { key: "pv_kw", label: "PV", color: "#d97706" },
-    { key: "storage_kw", label: "Storage", color: "#6d28d9" },
+    { key: "grid_kw", label: zh ? "电网" : "Grid", color: "#2563eb" },
+    { key: "pv_kw", label: zh ? "光伏" : "PV", color: "#d97706" },
+    { key: "storage_kw", label: zh ? "储能" : "Storage", color: "#6d28d9" },
   ]);
   renderSavingsBars();
   renderStationRows();
@@ -167,7 +185,7 @@ function renderSavingsBars() {
 function renderStationRows() {
   $("stationRows").innerHTML = state.overview.stations.map((station) => `
     <tr class="station-row" data-station="${station.id}">
-      <td><strong>${station.name}</strong><br><small>${station.type}</small></td>
+      <td><strong>${station.name}</strong><br><small>${tType(station.type)}</small></td>
       <td>${station.health_score}</td>
       <td>${number(station.current_power_kw)} kW</td>
       <td>${number(station.demand_peak_kw)} kW</td>
@@ -193,34 +211,37 @@ function renderStation() {
   const detail = state.stationDetail;
   const station = detail.station;
   $("stationName").textContent = station.name;
-  $("stationMeta").textContent = `${station.address} · ${station.connectors} connectors · ${number(station.transformer_capacity_kw)} kW transformer`;
-  $("stationMode").textContent = station.dispatch_mode;
+  $("stationMeta").textContent = state.lang === "zh"
+    ? `${station.address} · ${station.connectors} 个充电桩 · 变压器 ${number(station.transformer_capacity_kw)} kW`
+    : `${station.address} · ${station.connectors} connectors · ${number(station.transformer_capacity_kw)} kW transformer`;
+  $("stationMode").textContent = tMode(station.dispatch_mode);
   $("sSoc").textContent = `${station.storage_soc}%`;
   $("sHeadroom").textContent = number(station.demand_headroom_kw);
   $("sQueue").textContent = station.queue_length;
   $("sMargin").textContent = money(station.today_margin);
 
+  const zh2 = state.lang === "zh";
   drawLineChart($("stationChart"), detail.telemetry, [
-    { key: "grid_kw", label: "Grid", color: "#2563eb" },
-    { key: "load_kw", label: "Load", color: "#0f9f6e" },
-    { key: "pv_kw", label: "PV", color: "#d97706" },
+    { key: "grid_kw", label: zh2 ? "电网" : "Grid", color: "#2563eb" },
+    { key: "load_kw", label: zh2 ? "负荷" : "Load", color: "#0f9f6e" },
+    { key: "pv_kw", label: zh2 ? "光伏" : "PV", color: "#d97706" },
   ]);
   drawLineChart($("forecastChart"), detail.forecast, [
-    { key: "grid_kw", label: "Forecast Grid", color: "#2563eb" },
-    { key: "queue_length", label: "Queue", color: "#dc2626", scale: 90 },
+    { key: "grid_kw", label: zh2 ? "预测电网" : "Forecast Grid", color: "#2563eb" },
+    { key: "queue_length", label: zh2 ? "排队" : "Queue", color: "#dc2626", scale: 90 },
   ]);
   $("alertList").innerHTML = detail.alerts.map((alert) => `
     <div class="event">
       <strong>${alert.title}</strong>
       <p>${alert.detail}</p>
-      <div class="dispatch-meta"><span class="tag ${alert.priority}">${alert.priority}</span><span class="tag">${alert.timestamp}</span></div>
+      <div class="dispatch-meta"><span class="tag ${alert.priority}">${tPriority(alert.priority)}</span><span class="tag">${alert.timestamp}</span></div>
     </div>
   `).join("") || `<p>${t("no.alerts")}</p>`;
   $("pricingList").innerHTML = detail.pricing.map((item) => `
     <div class="event">
       <strong>${item.label} · ${item.strategy} · ${item.service_fee_delta}</strong>
       <p>${item.note}</p>
-      <small>Expected queue ${item.expected_queue}</small>
+      <small>${state.lang === "zh" ? "预计排队" : "Expected queue"} ${item.expected_queue}</small>
     </div>
   `).join("");
   renderStoragePlan();
@@ -234,11 +255,11 @@ function renderDispatch() {
       <strong>${item.title} · ${item.station}</strong>
       <p>${item.action}</p>
       <div class="dispatch-meta">
-        <span class="tag ${item.risk}">${item.risk}</span>
+        <span class="tag ${item.risk}">${tPriority(item.risk)}</span>
         <span class="tag">${item.window}</span>
-        <span class="tag">${item.mode}</span>
-        <span class="tag">${item.approval}</span>
-        <span class="tag">value ${number(item.value, 1)}</span>
+        <span class="tag">${tMode(item.mode)}</span>
+        <span class="tag">${tApproval(item.approval)}</span>
+        <span class="tag">${state.lang === "zh" ? "价值" : "value"} ${number(item.value, 1)}</span>
       </div>
       <small>${item.rationale}</small>
     </div>
@@ -250,7 +271,7 @@ function renderStoragePlan() {
   const detail = state.stationDetail;
   $("storagePlan").innerHTML = detail.storage_plan.slice(0, 12).map((row) => `
     <div class="plan-row">
-      <strong>${row.label} · ${row.action} · ${number(row.power_kw, 1)} kW</strong>
+      <strong>${row.label} · ${tAction(row.action)} · ${number(row.power_kw, 1)} kW</strong>
       <p>${row.reason}</p>
       <small>SOC ${row.soc}%</small>
     </div>
@@ -290,8 +311,8 @@ async function renderRoi() {
 
 function renderVpp() {
   const vpp = state.overview.vpp;
-  $("vppEvent").textContent = `${vpp.event.title} · ${vpp.event.start} · ${vpp.event.duration_minutes} min`;
-  $("vppStatus").textContent = vpp.event.status;
+  $("vppEvent").textContent = `${vpp.event.title} · ${vpp.event.start} · ${vpp.event.duration_minutes} ${state.lang === "zh" ? "分钟" : "min"}`;
+  $("vppStatus").textContent = state.lang === "zh" ? "待审批" : vpp.event.status;
   $("vReliable").textContent = number(vpp.reliable_capacity_kw);
   $("vRequested").textContent = number(vpp.event.requested_kw);
   $("vRevenue").textContent = money(vpp.expected_revenue);
@@ -300,14 +321,14 @@ function renderVpp() {
     <div class="dispatch-card">
       <strong>${item.station}</strong>
       <p>${item.method}</p>
-      <div class="dispatch-meta"><span class="tag">${number(item.target_kw)} kW target</span></div>
+      <div class="dispatch-meta"><span class="tag">${state.lang === "zh" ? "目标" : "target"} ${number(item.target_kw)} kW</span></div>
     </div>
   `).join("");
   $("vppResources").innerHTML = vpp.resources.map((item) => `
     <div class="event">
       <strong>${item.station}</strong>
-      <p>${number(item.adjustable_kw)} kW adjustable · ${item.duration_hours} h · ${item.confidence} confidence</p>
-      <small>${number(item.storage_available_kwh)} kWh storage · ${number(item.load_curtailment_kw)} kW curtailment · cost ${item.response_cost_per_kwh}</small>
+      <p>${number(item.adjustable_kw)} kW ${state.lang === "zh" ? "可调" : "adjustable"} · ${item.duration_hours} ${state.lang === "zh" ? "小时" : "h"} · ${item.confidence} ${state.lang === "zh" ? "置信度" : "confidence"}</p>
+      <small>${number(item.storage_available_kwh)} kWh ${state.lang === "zh" ? "储能可用" : "storage"} · ${number(item.load_curtailment_kw)} kW ${state.lang === "zh" ? "负荷削减" : "curtailment"} · ${state.lang === "zh" ? "成本" : "cost"} ${item.response_cost_per_kwh}</small>
     </div>
   `).join("");
 }
@@ -353,10 +374,11 @@ $("stationSelect").addEventListener("change", async (event) => {
 ["capacityInput", "powerInput", "capexInput", "vppInput"].forEach((id) => $(id).addEventListener("input", renderRoi));
 window.addEventListener("resize", () => {
   if (state.overview) {
+    const zh3 = state.lang === "zh";
     drawLineChart($("portfolioChart"), state.overview.portfolio_series, [
-      { key: "grid_kw", label: "Grid", color: "#2563eb" },
-      { key: "pv_kw", label: "PV", color: "#d97706" },
-      { key: "storage_kw", label: "Storage", color: "#6d28d9" },
+      { key: "grid_kw", label: zh3 ? "电网" : "Grid", color: "#2563eb" },
+      { key: "pv_kw", label: zh3 ? "光伏" : "PV", color: "#d97706" },
+      { key: "storage_kw", label: zh3 ? "储能" : "Storage", color: "#6d28d9" },
     ]);
     renderStation();
   }
