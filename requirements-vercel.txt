@@ -3,3 +3,4 @@ pydantic-settings>=2.3,<3
 structlog>=24.1,<25
 prometheus-client>=0.20,<1
 slowapi>=0.1.9,<1
+aiofiles>=23.0,<25

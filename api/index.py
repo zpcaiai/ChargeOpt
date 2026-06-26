@@ -1,10 +1,16 @@
 """Vercel Python serverless entrypoint.
 
-Vercel expects an ASGI callable named ``app``.  We create a fresh app
-instance here; the lifespan (DB pool init/close) does not fire in
-serverless — the app automatically falls back to in-memory fixtures
-when DATABASE_URL is not set.
+All requests are routed here via vercel.json catch-all.
+Static files are served by FastAPI's StaticFiles mount.
 """
+import os
+
+from fastapi.staticfiles import StaticFiles
+
 from chargeopt.app import create_app
 
 app = create_app()
+
+_static = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+if os.path.isdir(_static):
+    app.mount("/static", StaticFiles(directory=_static), name="static")
