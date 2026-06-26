@@ -1,5 +1,4 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
   "env": {
     "CHARGEOPT_SKIP_DB_MIGRATION": "1"
   },
