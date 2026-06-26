@@ -1,6 +1,13 @@
 {
-  "env": {
-    "CHARGEOPT_SKIP_DB_MIGRATION": "1"
-  },
-  "buildCommand": ""
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": { "includeFiles": "{chargeopt/**,static/**}" }
+    }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "api/index.py" }
+  ]
 }
