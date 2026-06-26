@@ -4,6 +4,8 @@
     "CHARGEOPT_SKIP_DB_MIGRATION": "1"
   },
   "installCommand": "pip install -r requirements-vercel.txt",
+  "buildCommand": "",
+  "outputDirectory": ".",
   "routes": [
     {
       "src": "/api/(.*)",
