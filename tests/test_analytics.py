@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from chargeopt.analytics import build_dispatch, build_overview, build_vpp, simulate_roi, station_detail
 from chargeopt.data import load_repository
 from chargeopt.revenue_intelligence import build_revenue_diagnostics
@@ -106,3 +108,23 @@ def test_revenue_diagnostics_ignore_non_commercial_device_telemetry():
 
     assert diagnostics["stations"][0]["monthly_net_impact"] > 0
     assert diagnostics["stations"][0]["operational_kpis"]["non_commercial_telemetry_ignored"] == 1
+
+
+def test_revenue_diagnostics_uses_realized_price_for_legacy_revenue_seed():
+    repo = load_repository()
+    legacy_telemetry = tuple(replace(point, revenue=round(point.energy_kwh * 1.25, 2)) for point in repo.telemetry)
+    legacy_repo = repo.__class__(
+        repo.tenants,
+        repo.regions,
+        repo.tariff_plans,
+        repo.stations,
+        legacy_telemetry,
+        repo.alerts,
+        repo.vpp_events,
+        repo.audit,
+    )
+
+    diagnostics = build_revenue_diagnostics(legacy_repo)
+
+    assert diagnostics["portfolio"]["monthly_net_impact"] > 0
+    assert diagnostics["portfolio"]["components"]["throughput_uplift"] > 0

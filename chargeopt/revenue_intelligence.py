@@ -146,8 +146,10 @@ def _counterfactual_hour(station: Station, point: TelemetryPoint, tariff) -> dic
     transformer_overload_kw = max(0.0, unmanaged_grid_kw - station.transformer_capacity_kw * 0.9)
     queue_hours = point.queue_length + transformer_overload_kw / max(1.0, station.max_connector_power_kw) * 2.5
     lost_energy_kwh = min(point.energy_kwh * 0.22, queue_hours * station.max_connector_power_kw * 0.08)
-    revenue = max(0.0, point.energy_kwh - lost_energy_kwh) * (price + tariff.service_fee_per_kwh)
-    queue_loss_avoided = lost_energy_kwh * tariff.service_fee_per_kwh * 0.65
+    unit_revenue = _realized_unit_revenue(point)
+    revenue = max(0.0, point.revenue - lost_energy_kwh * unit_revenue)
+    service_margin = max(tariff.service_fee_per_kwh, unit_revenue - price)
+    queue_loss_avoided = lost_energy_kwh * service_margin * 0.65
     return {
         "grid_kw": unmanaged_grid_kw,
         "grid_cost": unmanaged_grid_kw * price,
@@ -155,6 +157,12 @@ def _counterfactual_hour(station: Station, point: TelemetryPoint, tariff) -> dic
         "queue_loss_avoided": queue_loss_avoided,
         "queue_hours": queue_hours,
     }
+
+
+def _realized_unit_revenue(point: TelemetryPoint) -> float:
+    if point.energy_kwh <= 0:
+        return 0.0
+    return max(0.0, point.revenue / point.energy_kwh)
 
 
 def _monthly_uncertainty(residuals: list[float]) -> float:
