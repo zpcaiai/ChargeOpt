@@ -45,7 +45,7 @@ async def test_write_endpoint_returns_503_without_db(client):
 
 
 @pytest.mark.asyncio
-async def test_write_endpoint_disabled_in_production_without_api_key(monkeypatch):
+async def test_write_endpoint_requires_credentials_in_production_without_api_key(monkeypatch):
     from httpx import ASGITransport, AsyncClient
 
     from chargeopt import config as cfg
@@ -74,8 +74,8 @@ async def test_write_endpoint_disabled_in_production_without_api_key(monkeypatch
         }
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             resp = await ac.post("/api/telemetry", json=payload)
-        assert resp.status_code == 503
-        assert "API_KEY" in resp.json()["detail"]
+        assert resp.status_code == 401
+        assert "credentials" in resp.json()["detail"]
     finally:
         cfg.get_settings.cache_clear()
 
@@ -174,7 +174,19 @@ def test_repository_ingest_telemetry_writes_and_audits():
     from chargeopt.repository import ingest_telemetry
 
     conn = _transaction_conn()
-    conn.execute.return_value.fetchone.return_value = None
+    station_cursor = MagicMock()
+    station_cursor.fetchone.return_value = ("t-1",)
+    duplicate_cursor = MagicMock()
+    duplicate_cursor.fetchone.return_value = None
+    write_cursor = MagicMock()
+    conn.execute.side_effect = [
+        station_cursor,
+        write_cursor,
+        duplicate_cursor,
+        write_cursor,
+        write_cursor,
+        write_cursor,
+    ]
 
     with patch("chargeopt.repository.get_connection", return_value=_connection_context(conn)):
         result = ingest_telemetry(

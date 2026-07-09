@@ -259,6 +259,32 @@ class AuditResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Auth / RBAC
+# ---------------------------------------------------------------------------
+
+
+class PrincipalOut(BaseModel):
+    subject: str
+    tenant_id: str | None
+    role: str
+    display_name: str
+    auth_type: str
+    permissions: list[str]
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=240)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"]
+    expires_at: datetime
+    principal: PrincipalOut
+
+
+# ---------------------------------------------------------------------------
 # Write-path request/response models
 # ---------------------------------------------------------------------------
 
@@ -330,6 +356,112 @@ class RoiSimulationRequest(BaseModel):
 
 class RoiSimulationPersistedResponse(RoiResponse):
     id: int
+
+
+# ---------------------------------------------------------------------------
+# Industrial control-plane models
+# ---------------------------------------------------------------------------
+
+
+ProtocolName = Literal["ocpp", "modbus", "mqtt"]
+
+
+class ProtocolMessageRequest(BaseModel):
+    station_id: str = Field(min_length=1)
+    device_id: str | None = Field(default=None, min_length=1)
+    external_id: str = Field(min_length=1, max_length=160)
+    message_type: str = Field(min_length=1, max_length=120)
+    payload: dict[str, Any]
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=160)
+
+
+class ProtocolMessageResponse(BaseModel):
+    id: int
+    protocol: ProtocolName
+    station_id: str
+    device_id: str | None
+    status: str
+    telemetry_ingested: bool = False
+    task_id: str | None = None
+
+
+class TaskCreateRequest(BaseModel):
+    station_id: str | None = None
+    device_id: str | None = None
+    task_type: str = Field(min_length=1, max_length=120)
+    priority: int = Field(default=100, ge=1, le=1000)
+    payload: dict[str, Any]
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=160)
+
+
+class TaskResponse(BaseModel):
+    id: str
+    tenant_id: str
+    station_id: str | None
+    device_id: str | None
+    task_type: str
+    status: str
+    priority: int
+    payload: dict[str, Any]
+    result: dict[str, Any]
+
+
+class DispatchApprovalRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=120)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class DispatchApprovalResponse(BaseModel):
+    id: str
+    recommendation_id: str
+    status: Literal["pending", "approved", "rejected", "expired"]
+    task_id: str | None = None
+
+
+class EdgeReceiptRequest(BaseModel):
+    task_id: str = Field(min_length=1)
+    station_id: str | None = None
+    device_id: str | None = None
+    status: Literal["accepted", "executing", "succeeded", "failed", "rolled_back"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class EdgeReceiptResponse(BaseModel):
+    id: str
+    task_id: str
+    status: str
+
+
+class OptimizationRunRequest(BaseModel):
+    station_id: str | None = None
+    horizon_hours: int = Field(default=24, ge=1, le=48)
+    objective: Literal["cost", "revenue", "balanced"] = "balanced"
+
+
+class OptimizationRunResponse(BaseModel):
+    id: str
+    solver: str
+    objective: str
+    objective_value: float
+    dispatch_plan: list[dict[str, Any]]
+    constraints: dict[str, Any]
+
+
+class VppSettlementRequest(BaseModel):
+    event_id: str = Field(min_length=1)
+    baseline_kw: float = Field(ge=0)
+    delivered_kw: float = Field(ge=0)
+    settled_by: str = Field(min_length=1, max_length=120)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class VppSettlementResponse(BaseModel):
+    id: str
+    event_id: str
+    performance_score: float
+    gross_revenue: float
+    penalty: float
+    net_revenue: float
 
 
 # ---------------------------------------------------------------------------

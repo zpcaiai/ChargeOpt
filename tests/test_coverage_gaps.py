@@ -220,9 +220,9 @@ def _make_mock_conn(table_data: dict) -> MagicMock:
 
     def execute_side_effect(sql, *args, **kwargs):
         cursor = MagicMock()
-        sql_strip = sql.strip()
-        for key, rows in table_data.items():
-            if key in sql_strip:
+        sql_strip = sql.strip().lower()
+        for key, rows in sorted(table_data.items(), key=lambda item: len(item[0]), reverse=True):
+            if f"from chargeopt.{key}" in sql_strip:
                 cursor.fetchall.return_value = rows
                 return cursor
         cursor.fetchall.return_value = []

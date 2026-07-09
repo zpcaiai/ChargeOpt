@@ -13,6 +13,7 @@ from datetime import datetime
 from threading import Lock
 from uuid import uuid4
 
+from .auth import Principal, hash_token, new_session_token, session_expiry, verify_password
 from .config import get_settings
 from .data import Repository, load_repository
 from .db import get_connection
@@ -36,16 +37,13 @@ logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SECONDS: float = 30.0  # refresh at most every 30 s
 _cache_lock = Lock()
-_cached_repo: Repository | None = None
-_cache_expires_at: float = 0.0
+_cached_repos: dict[str, tuple[Repository, float]] = {}
 
 
 def invalidate_repository_cache() -> None:
     """Force the next call to load_repository_from_db to re-query the DB."""
-    global _cached_repo, _cache_expires_at
     with _cache_lock:
-        _cached_repo = None
-        _cache_expires_at = 0.0
+        _cached_repos.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -53,32 +51,31 @@ def invalidate_repository_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
-def load_repository_from_db() -> Repository:
+def load_repository_from_db(tenant_id: str | None = None) -> Repository:
     """Return a Repository, using a short TTL cache to avoid per-request DB queries.
 
     Falls back to in-memory fixtures when DATABASE_URL is absent.
     """
-    global _cached_repo, _cache_expires_at
-
     settings = get_settings()
     if not settings.use_db:
         logger.debug("No DATABASE_URL – using in-memory repository.")
-        return load_repository()
+        return _filter_repository_by_tenant(load_repository(), tenant_id)
 
     now = time.monotonic()
+    cache_key = tenant_id or "*"
     with _cache_lock:
-        if _cached_repo is not None and now < _cache_expires_at:
-            return _cached_repo
+        cached = _cached_repos.get(cache_key)
+        if cached is not None and now < cached[1]:
+            return cached[0]
 
     try:
-        repo = _load_from_postgres()
+        repo = _load_from_postgres(tenant_id)
     except Exception:
         logger.exception("Failed to load repository from PostgreSQL – falling back to in-memory fixtures.")
-        repo = load_repository()
+        repo = _filter_repository_by_tenant(load_repository(), tenant_id)
 
     with _cache_lock:
-        _cached_repo = repo
-        _cache_expires_at = time.monotonic() + _CACHE_TTL_SECONDS
+        _cached_repos[cache_key] = (repo, time.monotonic() + _CACHE_TTL_SECONDS)
 
     return repo
 
@@ -88,16 +85,33 @@ def load_repository_from_db() -> Repository:
 # ---------------------------------------------------------------------------
 
 
-def _load_from_postgres() -> Repository:
+def _filter_repository_by_tenant(repo: Repository, tenant_id: str | None) -> Repository:
+    if tenant_id is None:
+        return repo
+    station_ids = {station.id for station in repo.stations if station.tenant_id == tenant_id}
+    return Repository(
+        tenants=tuple(tenant for tenant in repo.tenants if tenant.id == tenant_id),
+        regions=repo.regions,
+        tariff_plans=repo.tariff_plans,
+        stations=tuple(station for station in repo.stations if station.tenant_id == tenant_id),
+        telemetry=tuple(point for point in repo.telemetry if point.station_id in station_ids),
+        alerts=tuple(alert for alert in repo.alerts if alert.station_id in station_ids),
+        vpp_events=tuple(event for event in repo.vpp_events if event.tenant_id == tenant_id),
+        audit=tuple(entry for entry in repo.audit if tenant_id in entry.detail or tenant_id in entry.target),
+    )
+
+
+def _load_from_postgres(tenant_id: str | None = None) -> Repository:
     with get_connection() as conn:
-        tenants = _load_tenants(conn)
+        _set_tenant_context(conn, tenant_id)
+        tenants = _load_tenants(conn, tenant_id)
         regions = _load_regions(conn)
         tariff_plans = _load_tariff_plans(conn)
-        stations = _load_stations(conn)
-        telemetry = _load_telemetry(conn)
-        alerts = _load_alerts(conn)
-        vpp_events = _load_vpp_events(conn)
-        audit = _load_audit(conn)
+        stations = _load_stations(conn, tenant_id)
+        telemetry = _load_telemetry(conn, tenant_id)
+        alerts = _load_alerts(conn, tenant_id)
+        vpp_events = _load_vpp_events(conn, tenant_id)
+        audit = _load_audit(conn, tenant_id)
 
     return Repository(
         tenants=tuple(tenants),
@@ -111,8 +125,13 @@ def _load_from_postgres() -> Repository:
     )
 
 
-def _load_tenants(conn) -> list[Tenant]:
-    rows = conn.execute("SELECT id, name, plan FROM chargeopt.tenants ORDER BY id").fetchall()
+def _load_tenants(conn, tenant_id: str | None = None) -> list[Tenant]:
+    if tenant_id is None:
+        rows = conn.execute("SELECT id, name, plan FROM chargeopt.tenants ORDER BY id").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, name, plan FROM chargeopt.tenants WHERE id = %s ORDER BY id", (tenant_id,)
+        ).fetchall()
     return [Tenant(r[0], r[1], r[2]) for r in rows]
 
 
@@ -146,17 +165,21 @@ def _load_tariff_plans(conn) -> list[TariffPlan]:
     ]
 
 
-def _load_stations(conn) -> list[Station]:
-    rows = conn.execute(
-        """
+def _load_stations(conn, tenant_id: str | None = None) -> list[Station]:
+    sql = """
         SELECT id, tenant_id, region_id, name, station_type, address,
                latitude, longitude, transformer_capacity_kw, charger_count,
                connector_count, max_connector_power_kw, storage_capacity_kwh,
                storage_power_kw, pv_capacity_kw, tariff_plan_id,
                monthly_opex, reliability_score, dispatch_mode
-        FROM chargeopt.stations ORDER BY id
+        FROM chargeopt.stations
         """
-    ).fetchall()
+    params: tuple = ()
+    if tenant_id is not None:
+        sql += " WHERE tenant_id = %s"
+        params = (tenant_id,)
+    sql += " ORDER BY id"
+    rows = conn.execute(sql, params).fetchall()
     return [
         Station(
             r[0],
@@ -183,16 +206,20 @@ def _load_stations(conn) -> list[Station]:
     ]
 
 
-def _load_telemetry(conn) -> list[TelemetryPoint]:
-    rows = conn.execute(
+def _load_telemetry(conn, tenant_id: str | None = None) -> list[TelemetryPoint]:
+    sql = """
+        SELECT tp.station_id, tp.timestamp, tp.load_kw, tp.pv_kw, tp.grid_kw,
+               tp.storage_power_kw, tp.storage_soc, tp.connector_occupied,
+               tp.queue_length, tp.sessions, tp.energy_kwh, tp.revenue, tp.alert_count
+        FROM chargeopt.telemetry_points tp
+        JOIN chargeopt.stations s ON s.id = tp.station_id
         """
-        SELECT station_id, timestamp, load_kw, pv_kw, grid_kw,
-               storage_power_kw, storage_soc, connector_occupied,
-               queue_length, sessions, energy_kwh, revenue, alert_count
-        FROM chargeopt.telemetry_points
-        ORDER BY station_id, timestamp
-        """
-    ).fetchall()
+    params: tuple = ()
+    if tenant_id is not None:
+        sql += " WHERE s.tenant_id = %s"
+        params = (tenant_id,)
+    sql += " ORDER BY tp.station_id, tp.timestamp"
+    rows = conn.execute(sql, params).fetchall()
     return [
         TelemetryPoint(
             r[0],
@@ -213,27 +240,40 @@ def _load_telemetry(conn) -> list[TelemetryPoint]:
     ]
 
 
-def _load_alerts(conn) -> list[Alert]:
-    rows = conn.execute(
-        "SELECT id, station_id, timestamp, priority, title, detail, acknowledged"
-        " FROM chargeopt.alerts ORDER BY timestamp DESC"
-    ).fetchall()
+def _load_alerts(conn, tenant_id: str | None = None) -> list[Alert]:
+    sql = """
+        SELECT a.id, a.station_id, a.timestamp, a.priority, a.title, a.detail, a.acknowledged
+        FROM chargeopt.alerts a
+        JOIN chargeopt.stations s ON s.id = a.station_id
+        """
+    params: tuple = ()
+    if tenant_id is not None:
+        sql += " WHERE s.tenant_id = %s"
+        params = (tenant_id,)
+    sql += " ORDER BY a.timestamp DESC"
+    rows = conn.execute(sql, params).fetchall()
     return [Alert(r[0], r[1], _to_dt(r[2]), r[3], r[4], r[5], bool(r[6])) for r in rows]
 
 
-def _load_vpp_events(conn) -> list[VppEvent]:
-    rows = conn.execute(
-        "SELECT id, tenant_id, title, start_at, duration_minutes, requested_kw, incentive_per_kwh, status"
-        " FROM chargeopt.vpp_events ORDER BY start_at DESC"
-    ).fetchall()
+def _load_vpp_events(conn, tenant_id: str | None = None) -> list[VppEvent]:
+    sql = "SELECT id, tenant_id, title, start_at, duration_minutes, requested_kw, incentive_per_kwh, status FROM chargeopt.vpp_events"
+    params: tuple = ()
+    if tenant_id is not None:
+        sql += " WHERE tenant_id = %s"
+        params = (tenant_id,)
+    sql += " ORDER BY start_at DESC"
+    rows = conn.execute(sql, params).fetchall()
     return [VppEvent(r[0], r[1], r[2], _to_dt(r[3]), int(r[4]), float(r[5]), float(r[6]), r[7]) for r in rows]
 
 
-def _load_audit(conn) -> list[AuditEntry]:
-    rows = conn.execute(
-        "SELECT id, timestamp, actor, action, target, detail"
-        " FROM chargeopt.audit_entries ORDER BY timestamp DESC LIMIT 200"
-    ).fetchall()
+def _load_audit(conn, tenant_id: str | None = None) -> list[AuditEntry]:
+    sql = "SELECT id, timestamp, actor, action, target, detail FROM chargeopt.audit_entries"
+    params: tuple = ()
+    if tenant_id is not None:
+        sql += " WHERE tenant_id = %s"
+        params = (tenant_id,)
+    sql += " ORDER BY timestamp DESC LIMIT 200"
+    rows = conn.execute(sql, params).fetchall()
     return [AuditEntry(r[0], _to_dt(r[1]), r[2], r[3], r[4], r[5]) for r in rows]
 
 
@@ -243,21 +283,45 @@ def _to_dt(value: object) -> datetime:
     return datetime.fromisoformat(str(value))
 
 
+def _set_tenant_context(conn, tenant_id: str | None) -> None:
+    conn.execute("SELECT set_config('chargeopt.tenant_id', %s, true)", (tenant_id or "*",))
+
+
+def _tenant_for_station(conn, station_id: str | None) -> str:
+    if station_id is None:
+        return "t-001"
+    row = conn.execute("SELECT tenant_id FROM chargeopt.stations WHERE id = %s", (station_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"Unknown station_id: {station_id}")
+    return str(row[0])
+
+
+def _tenant_for_vpp_event(conn, event_id: str) -> str:
+    row = conn.execute("SELECT tenant_id FROM chargeopt.vpp_events WHERE id = %s", (event_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"Unknown event_id: {event_id}")
+    return str(row[0])
+
+
 # ---------------------------------------------------------------------------
 # Write-path operations
 # ---------------------------------------------------------------------------
 
 
-def append_audit(actor: str, action: str, target: str, detail: str) -> str:
+def append_audit(actor: str, action: str, target: str, detail: str, tenant_id: str = "t-001") -> str:
     """Persist an audit entry and return its generated ID."""
     audit_id = f"au-{uuid4().hex}"
     with get_connection() as conn, conn.transaction():
         conn.execute(
+            "SELECT set_config('chargeopt.tenant_id', %s, true)",
+            (tenant_id,),
+        )
+        conn.execute(
             """
-                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
-                VALUES (%s, now(), %s, %s, %s, %s)
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), %s, %s, %s, %s)
                 """,
-            (audit_id, actor, action, target, detail),
+            (audit_id, tenant_id, actor, action, target, detail),
         )
     invalidate_repository_cache()
     return audit_id
@@ -272,6 +336,8 @@ def ingest_telemetry(payload: dict) -> dict[str, object]:
     actor = payload.get("actor") or "edge-gateway"
 
     with get_connection() as conn, conn.transaction():
+        tenant_id = _tenant_for_station(conn, station_id)
+        _set_tenant_context(conn, tenant_id)
         existing = conn.execute(
             "SELECT 1 FROM chargeopt.telemetry_ingest_log WHERE idempotency_key = %s",
             (idempotency_key,),
@@ -324,11 +390,12 @@ def ingest_telemetry(payload: dict) -> dict[str, object]:
         )
         conn.execute(
             """
-                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
-                VALUES (%s, now(), %s, 'telemetry.ingested', %s, %s)
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), %s, 'telemetry.ingested', %s, %s)
                 """,
             (
                 f"au-{uuid4().hex}",
+                tenant_id,
                 actor,
                 station_id,
                 f"Telemetry point {timestamp_key} ingested with key {idempotency_key}.",
@@ -346,6 +413,19 @@ def ingest_telemetry(payload: dict) -> dict[str, object]:
 def acknowledge_alert(alert_id: str, actor: str) -> dict[str, object]:
     """Acknowledge an alert and audit the action."""
     with get_connection() as conn, conn.transaction():
+        tenant_row = conn.execute(
+            """
+            SELECT s.tenant_id
+            FROM chargeopt.alerts a
+            JOIN chargeopt.stations s ON s.id = a.station_id
+            WHERE a.id = %s
+            """,
+            (alert_id,),
+        ).fetchone()
+        if tenant_row is None:
+            raise KeyError(f"Unknown alert_id: {alert_id}")
+        tenant_id = str(tenant_row[0])
+        _set_tenant_context(conn, tenant_id)
         cursor = conn.execute(
             "UPDATE chargeopt.alerts SET acknowledged = true WHERE id = %s",
             (alert_id,),
@@ -354,10 +434,10 @@ def acknowledge_alert(alert_id: str, actor: str) -> dict[str, object]:
             raise KeyError(f"Unknown alert_id: {alert_id}")
         conn.execute(
             """
-                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
-                VALUES (%s, now(), %s, 'alert.acknowledged', %s, 'Alert acknowledged.')
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), %s, 'alert.acknowledged', %s, 'Alert acknowledged.')
                 """,
-            (f"au-{uuid4().hex}", actor, alert_id),
+            (f"au-{uuid4().hex}", tenant_id, actor, alert_id),
         )
     invalidate_repository_cache()
     return {"id": alert_id, "acknowledged": True}
@@ -368,15 +448,19 @@ def persist_dispatch_recommendations(recommendations: list[dict], actor: str) ->
     from psycopg.types.json import Json
 
     with get_connection() as conn, conn.transaction():
+        tenant_id = "t-001"
         for item in recommendations:
+            tenant_id = _tenant_for_station(conn, item["station_id"])
+            _set_tenant_context(conn, tenant_id)
             conn.execute(
                 """
                     INSERT INTO chargeopt.dispatch_recommendations (
-                        id, station_id, title, risk, action, value, dispatch_window,
+                        id, tenant_id, station_id, title, risk, action, value, dispatch_window,
                         mode, approval, rationale, command_payload
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
+                        tenant_id = EXCLUDED.tenant_id,
                         title = EXCLUDED.title,
                         risk = EXCLUDED.risk,
                         action = EXCLUDED.action,
@@ -390,6 +474,7 @@ def persist_dispatch_recommendations(recommendations: list[dict], actor: str) ->
                     """,
                 (
                     item["id"],
+                    tenant_id,
                     item["station_id"],
                     item["title"],
                     item["risk"],
@@ -404,10 +489,10 @@ def persist_dispatch_recommendations(recommendations: list[dict], actor: str) ->
             )
         conn.execute(
             """
-                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
-                VALUES (%s, now(), %s, 'dispatch.generated', 'dispatch_recommendations', %s)
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), %s, 'dispatch.generated', 'dispatch_recommendations', %s)
                 """,
-            (f"au-{uuid4().hex}", actor, f"Persisted {len(recommendations)} dispatch recommendations."),
+            (f"au-{uuid4().hex}", tenant_id, actor, f"Persisted {len(recommendations)} dispatch recommendations."),
         )
     invalidate_repository_cache()
     return len(recommendations)
@@ -420,6 +505,14 @@ def update_dispatch_status(recommendation_id: str, status: str, actor: str, reas
         raise ValueError(f"Invalid dispatch status: {status}")
 
     with get_connection() as conn, conn.transaction():
+        tenant_row = conn.execute(
+            "SELECT tenant_id FROM chargeopt.dispatch_recommendations WHERE id = %s",
+            (recommendation_id,),
+        ).fetchone()
+        if tenant_row is None:
+            raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
+        tenant_id = str(tenant_row[0])
+        _set_tenant_context(conn, tenant_id)
         cursor = conn.execute(
             """
                 UPDATE chargeopt.dispatch_recommendations
@@ -436,10 +529,10 @@ def update_dispatch_status(recommendation_id: str, status: str, actor: str, reas
             raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
         conn.execute(
             """
-                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
-                VALUES (%s, now(), %s, 'dispatch.status_changed', %s, %s)
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), %s, 'dispatch.status_changed', %s, %s)
                 """,
-            (f"au-{uuid4().hex}", actor, recommendation_id, reason or f"Status changed to {status}."),
+            (f"au-{uuid4().hex}", tenant_id, actor, recommendation_id, reason or f"Status changed to {status}."),
         )
     invalidate_repository_cache()
     return {"id": recommendation_id, "status": status}
@@ -450,6 +543,8 @@ def persist_roi_simulation(station_id: str | None, roi: dict, inputs: dict) -> i
     from psycopg.types.json import Json
 
     with get_connection() as conn, conn.transaction():
+        tenant_id = _tenant_for_station(conn, station_id) if station_id else "t-001"
+        _set_tenant_context(conn, tenant_id)
         row = conn.execute(
             """
                 INSERT INTO chargeopt.roi_simulations (
@@ -482,10 +577,450 @@ def persist_roi_simulation(station_id: str | None, roi: dict, inputs: dict) -> i
         simulation_id = int(row[0])
         conn.execute(
             """
-                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
-                VALUES (%s, now(), 'system', 'roi.persisted', %s, %s)
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), 'system', 'roi.persisted', %s, %s)
                 """,
-            (f"au-{uuid4().hex}", station_id or "portfolio", f"ROI simulation {simulation_id} persisted."),
+            (f"au-{uuid4().hex}", tenant_id, station_id or "portfolio", f"ROI simulation {simulation_id} persisted."),
         )
     invalidate_repository_cache()
     return simulation_id
+
+
+# ---------------------------------------------------------------------------
+# Auth, protocol, task, approval, optimization, and settlement operations
+# ---------------------------------------------------------------------------
+
+
+def authenticate_user(email: str, password: str) -> dict[str, object]:
+    token = None
+    with get_connection() as conn, conn.transaction():
+        row = conn.execute(
+            """
+            SELECT id, tenant_id, email, display_name, role, password_salt, password_hash
+            FROM chargeopt.users
+            WHERE lower(email) = lower(%s) AND active = true
+            """,
+            (email,),
+        ).fetchone()
+        if row is None or not verify_password(password, row[5], row[6]):
+            raise PermissionError("Invalid email or password.")
+        _set_tenant_context(conn, row[1])
+        token = new_session_token()
+        expires_at = session_expiry()
+        conn.execute(
+            "INSERT INTO chargeopt.sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
+            (hash_token(token), row[0], expires_at),
+        )
+        conn.execute("UPDATE chargeopt.users SET last_login_at = now() WHERE id = %s", (row[0],))
+        principal = Principal(row[0], row[1], row[4], row[3], "bearer")
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'auth.login', %s, 'User login succeeded.')
+            """,
+            (f"au-{uuid4().hex}", row[1], row[2], row[0]),
+        )
+    return {"access_token": token, "expires_at": expires_at, "principal": principal}
+
+
+def principal_from_session(token: str) -> Principal | None:
+    with get_connection() as conn:
+        _set_tenant_context(conn, None)
+        row = conn.execute(
+            """
+            SELECT u.id, u.tenant_id, u.display_name, u.role
+            FROM chargeopt.sessions s
+            JOIN chargeopt.users u ON u.id = s.user_id
+            WHERE s.token_hash = %s
+              AND s.revoked_at IS NULL
+              AND s.expires_at > now()
+              AND u.active = true
+            """,
+            (hash_token(token),),
+        ).fetchone()
+    if row is None:
+        return None
+    return Principal(row[0], row[1], row[3], row[2], "bearer")
+
+
+def persist_protocol_message(
+    tenant_id: str,
+    protocol: str,
+    station_id: str,
+    device_id: str | None,
+    external_id: str,
+    message_type: str,
+    payload: dict,
+) -> dict[str, object]:
+    from psycopg.types.json import Json
+
+    with get_connection() as conn, conn.transaction():
+        tenant_id = _tenant_for_station(conn, station_id)
+        _set_tenant_context(conn, tenant_id)
+        if device_id is None:
+            device_row = conn.execute(
+                "SELECT id FROM chargeopt.devices WHERE protocol = %s AND external_id = %s",
+                (protocol, external_id),
+            ).fetchone()
+            if device_row is None:
+                device_id = f"dev-{uuid4().hex}"
+                conn.execute(
+                    """
+                    INSERT INTO chargeopt.devices (id, tenant_id, station_id, protocol, external_id, status, last_seen_at)
+                    VALUES (%s, %s, %s, %s, %s, 'online', now())
+                    """,
+                    (device_id, tenant_id, station_id, protocol, external_id),
+                )
+            else:
+                device_id = str(device_row[0])
+        else:
+            conn.execute(
+                "UPDATE chargeopt.devices SET status = 'online', last_seen_at = now() WHERE id = %s", (device_id,)
+            )
+        row = conn.execute(
+            """
+            INSERT INTO chargeopt.protocol_messages (
+                tenant_id, device_id, station_id, protocol, direction, message_type, payload, status
+            )
+            VALUES (%s, %s, %s, %s, 'inbound', %s, %s, 'accepted')
+            RETURNING id
+            """,
+            (tenant_id, device_id, station_id, protocol, message_type, Json(payload)),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'protocol.message_received', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", tenant_id, f"{protocol}:{external_id}", device_id, message_type),
+        )
+    invalidate_repository_cache()
+    return {"id": int(row[0]), "tenant_id": tenant_id, "device_id": device_id}
+
+
+def enqueue_task(
+    tenant_id: str,
+    station_id: str | None,
+    device_id: str | None,
+    task_type: str,
+    payload: dict,
+    priority: int = 100,
+    idempotency_key: str | None = None,
+) -> dict[str, object]:
+    from psycopg.types.json import Json
+
+    task_id = f"tsk-{uuid4().hex}"
+    with get_connection() as conn, conn.transaction():
+        if station_id is not None:
+            tenant_id = _tenant_for_station(conn, station_id)
+        _set_tenant_context(conn, tenant_id)
+        row = conn.execute(
+            """
+            INSERT INTO chargeopt.task_queue (
+                id, tenant_id, station_id, device_id, task_type, priority, idempotency_key, payload
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = now()
+            RETURNING id, tenant_id, station_id, device_id, task_type, status, priority, payload, result
+            """,
+            (task_id, tenant_id, station_id, device_id, task_type, priority, idempotency_key, Json(payload)),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), 'system', 'task.enqueued', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", row[1], row[0], task_type),
+        )
+    return _task_row_to_dict(row)
+
+
+def _task_row_to_dict(row) -> dict[str, object]:
+    return {
+        "id": row[0],
+        "tenant_id": row[1],
+        "station_id": row[2],
+        "device_id": row[3],
+        "task_type": row[4],
+        "status": row[5],
+        "priority": int(row[6]),
+        "payload": row[7] or {},
+        "result": row[8] or {},
+    }
+
+
+def request_dispatch_approval(recommendation_id: str, principal: Principal, reason: str | None) -> dict[str, object]:
+    approval_id = f"apv-{uuid4().hex}"
+    with get_connection() as conn, conn.transaction():
+        row = conn.execute(
+            "SELECT tenant_id FROM chargeopt.dispatch_recommendations WHERE id = %s",
+            (recommendation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
+        tenant_id = str(row[0])
+        _set_tenant_context(conn, tenant_id)
+        approval = conn.execute(
+            """
+            INSERT INTO chargeopt.dispatch_approvals (id, tenant_id, recommendation_id, requested_by, reason)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (recommendation_id) DO UPDATE SET reason = EXCLUDED.reason
+            RETURNING id, recommendation_id, status
+            """,
+            (approval_id, tenant_id, recommendation_id, principal.subject, reason),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'dispatch.approval_requested', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", tenant_id, principal.subject, recommendation_id, reason or "Approval requested."),
+        )
+    return {"id": approval[0], "recommendation_id": approval[1], "status": approval[2], "task_id": None}
+
+
+def review_dispatch_approval(
+    recommendation_id: str,
+    principal: Principal,
+    approved: bool,
+    reason: str | None,
+) -> dict[str, object]:
+    with get_connection() as conn, conn.transaction():
+        row = conn.execute(
+            """
+            SELECT dr.tenant_id, dr.station_id, dr.command_payload
+            FROM chargeopt.dispatch_recommendations dr
+            WHERE dr.id = %s
+            """,
+            (recommendation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
+        tenant_id, station_id, command_payload = row[0], row[1], row[2] or {}
+        _set_tenant_context(conn, tenant_id)
+        status = "approved" if approved else "rejected"
+        approval = conn.execute(
+            """
+            UPDATE chargeopt.dispatch_approvals
+            SET status = %s, reviewed_by = %s, reason = %s, reviewed_at = now()
+            WHERE recommendation_id = %s
+            RETURNING id, recommendation_id, status
+            """,
+            (status, principal.subject, reason, recommendation_id),
+        ).fetchone()
+        if approval is None:
+            approval = conn.execute(
+                """
+                INSERT INTO chargeopt.dispatch_approvals (
+                    id, tenant_id, recommendation_id, requested_by, reviewed_by, status, reason, reviewed_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                RETURNING id, recommendation_id, status
+                """,
+                (
+                    f"apv-{uuid4().hex}",
+                    tenant_id,
+                    recommendation_id,
+                    principal.subject,
+                    principal.subject,
+                    status,
+                    reason,
+                ),
+            ).fetchone()
+        task_id = None
+        if approved:
+            task = conn.execute(
+                """
+                INSERT INTO chargeopt.task_queue (id, tenant_id, station_id, task_type, priority, payload)
+                VALUES (%s, %s, %s, 'dispatch.execute', 10, %s)
+                RETURNING id
+                """,
+                (f"tsk-{uuid4().hex}", tenant_id, station_id, JsonCompat(command_payload)),
+            ).fetchone()
+            task_id = task[0]
+            conn.execute(
+                "UPDATE chargeopt.dispatch_recommendations SET status = 'approved', reviewed_by = %s, reviewed_at = now() WHERE id = %s",
+                (principal.subject, recommendation_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE chargeopt.dispatch_recommendations SET status = 'rejected', reviewed_by = %s, reviewed_at = now(), review_reason = %s WHERE id = %s",
+                (principal.subject, reason, recommendation_id),
+            )
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'dispatch.approval_reviewed', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", tenant_id, principal.subject, recommendation_id, status),
+        )
+    invalidate_repository_cache()
+    return {"id": approval[0], "recommendation_id": approval[1], "status": approval[2], "task_id": task_id}
+
+
+def JsonCompat(payload: dict):
+    from psycopg.types.json import Json
+
+    return Json(payload)
+
+
+def record_edge_receipt(
+    tenant_id: str,
+    task_id: str,
+    station_id: str | None,
+    device_id: str | None,
+    status: str,
+    payload: dict,
+) -> dict[str, str]:
+    from psycopg.types.json import Json
+
+    receipt_id = f"rcp-{uuid4().hex}"
+    with get_connection() as conn, conn.transaction():
+        task_row = conn.execute("SELECT tenant_id FROM chargeopt.task_queue WHERE id = %s", (task_id,)).fetchone()
+        if task_row is None:
+            raise KeyError(f"Unknown task_id: {task_id}")
+        tenant_id = str(task_row[0])
+        _set_tenant_context(conn, tenant_id)
+        conn.execute(
+            """
+            INSERT INTO chargeopt.edge_command_receipts (id, tenant_id, task_id, station_id, device_id, status, payload)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (receipt_id, tenant_id, task_id, station_id, device_id, status, Json(payload)),
+        )
+        task_status = (
+            "completed" if status == "succeeded" else "failed" if status in {"failed", "rolled_back"} else "running"
+        )
+        conn.execute(
+            """
+            UPDATE chargeopt.task_queue
+            SET status = %s, result = %s, completed_at = CASE WHEN %s IN ('completed', 'failed') THEN now() ELSE completed_at END,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                task_status,
+                Json({"edge_status": status, "receipt_id": receipt_id, "payload": payload}),
+                task_status,
+                task_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), 'edge-gateway', 'edge.receipt', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", tenant_id, task_id, status),
+        )
+    return {"id": receipt_id, "task_id": task_id, "status": status}
+
+
+def persist_optimization_run(
+    tenant_id: str,
+    scope: str,
+    objective: str,
+    horizon_hours: int,
+    solver: str,
+    objective_value: float,
+    inputs: dict,
+    outputs: dict,
+    created_by: str,
+) -> str:
+    from psycopg.types.json import Json
+
+    run_id = f"opt-{uuid4().hex}"
+    with get_connection() as conn, conn.transaction():
+        _set_tenant_context(conn, tenant_id)
+        conn.execute(
+            """
+            INSERT INTO chargeopt.optimization_runs (
+                id, tenant_id, scope, objective, horizon_hours, solver, status,
+                objective_value, inputs, outputs, created_by
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, 'completed', %s, %s, %s, %s)
+            """,
+            (
+                run_id,
+                tenant_id,
+                scope,
+                objective,
+                horizon_hours,
+                solver,
+                objective_value,
+                Json(inputs),
+                Json(outputs),
+                created_by,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'optimization.completed', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", tenant_id, created_by, run_id, f"{solver}:{objective_value}"),
+        )
+    return run_id
+
+
+def settle_vpp_event(
+    event_id: str,
+    baseline_kw: float,
+    delivered_kw: float,
+    settled_by: str,
+    evidence: dict,
+) -> dict[str, object]:
+    from psycopg.types.json import Json
+
+    settlement_id = f"set-{uuid4().hex}"
+    with get_connection() as conn, conn.transaction():
+        tenant_id = _tenant_for_vpp_event(conn, event_id)
+        _set_tenant_context(conn, tenant_id)
+        event = conn.execute(
+            "SELECT duration_minutes, incentive_per_kwh FROM chargeopt.vpp_events WHERE id = %s",
+            (event_id,),
+        ).fetchone()
+        duration_hours = float(event[0]) / 60
+        incentive = float(event[1])
+        performance = min(1.2, delivered_kw / max(1, baseline_kw))
+        gross = delivered_kw * duration_hours * incentive
+        penalty = 0 if performance >= 0.9 else gross * (0.9 - performance)
+        net = max(0, gross - penalty)
+        conn.execute(
+            """
+            INSERT INTO chargeopt.vpp_settlements (
+                id, tenant_id, event_id, baseline_kw, delivered_kw, performance_score,
+                gross_revenue, penalty, net_revenue, evidence, settled_by
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                settlement_id,
+                tenant_id,
+                event_id,
+                baseline_kw,
+                delivered_kw,
+                performance,
+                gross,
+                penalty,
+                net,
+                Json(evidence),
+                settled_by,
+            ),
+        )
+        conn.execute("UPDATE chargeopt.vpp_events SET status = 'settled' WHERE id = %s", (event_id,))
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'vpp.settled', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", tenant_id, settled_by, event_id, f"net={round(net, 2)}"),
+        )
+    invalidate_repository_cache()
+    return {
+        "id": settlement_id,
+        "event_id": event_id,
+        "performance_score": round(performance, 4),
+        "gross_revenue": round(gross, 2),
+        "penalty": round(penalty, 2),
+        "net_revenue": round(net, 2),
+    }

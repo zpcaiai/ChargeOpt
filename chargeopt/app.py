@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response, Security, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response, Security, status
 from fastapi.exception_handlers import request_validation_exception_handler  # noqa: F401
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,37 +30,64 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .analytics import build_dispatch, build_overview, build_vpp, simulate_roi, station_detail, station_summary
+from .auth import ROLE_PERMISSIONS, Principal, development_principal, has_permission, static_api_key_principal
 from .config import get_settings
 from .db import close_pool, health_check, init_pool
 from .logging_config import configure_logging
+from .optimizer import solve_dispatch_optimization
+from .protocols import normalize_protocol_message
 from .repository import (
     acknowledge_alert,
+    authenticate_user,
+    enqueue_task,
     ingest_telemetry,
     load_repository_from_db,
     persist_dispatch_recommendations,
+    persist_optimization_run,
+    persist_protocol_message,
     persist_roi_simulation,
+    principal_from_session,
+    record_edge_receipt,
+    request_dispatch_approval,
+    review_dispatch_approval,
+    settle_vpp_event,
     update_dispatch_status,
 )
 from .schemas import (
     AlertAcknowledgeRequest,
     AlertAcknowledgeResponse,
     AuditResponse,
+    DispatchApprovalRequest,
+    DispatchApprovalResponse,
     DispatchGenerateRequest,
     DispatchGenerateResponse,
     DispatchResponse,
     DispatchStatusRequest,
     DispatchStatusResponse,
+    EdgeReceiptRequest,
+    EdgeReceiptResponse,
     HealthResponse,
+    LoginRequest,
+    LoginResponse,
+    OptimizationRunRequest,
+    OptimizationRunResponse,
     OverviewResponse,
+    PrincipalOut,
     ProblemDetail,
+    ProtocolMessageRequest,
+    ProtocolMessageResponse,
     RoiResponse,
     RoiSimulationPersistedResponse,
     RoiSimulationRequest,
     StationDetailResponse,
     StationListResponse,
+    TaskCreateRequest,
+    TaskResponse,
     TelemetryIngestRequest,
     TelemetryIngestResponse,
     VppResponse,
+    VppSettlementRequest,
+    VppSettlementResponse,
 )
 
 logger = structlog.get_logger(__name__)
@@ -238,39 +265,84 @@ def create_app(use_lifespan: bool = True) -> FastAPI:
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def require_api_key(api_key: str | None = Security(_api_key_header)) -> None:
-    """Dependency: reject requests without a valid API key when one is configured."""
-    configured = get_settings().api_key
-    if configured is None:
-        return  # Security disabled – development mode
-    # Use constant-time comparison to prevent timing-oracle attacks.
-    provided = api_key or ""
-    if not hmac.compare_digest(provided.encode(), configured.encode()):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key.",
-            headers={"WWW-Authenticate": "ApiKey"},
-        )
+def _principal_out(principal: Principal) -> PrincipalOut:
+    permissions = ROLE_PERMISSIONS[principal.role]
+    return PrincipalOut(
+        subject=principal.subject,
+        tenant_id=principal.tenant_id,
+        role=principal.role,
+        display_name=principal.display_name,
+        auth_type=principal.auth_type,
+        permissions=sorted(permissions),
+    )
 
 
-def require_write_api_key(api_key: str | None = Security(_api_key_header)) -> None:
-    """Write-path dependency.
+def _extract_bearer(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
 
-    In production, writes must not be available unless an API key has been
-    explicitly configured. In development, the same optional-auth behaviour as
-    read endpoints is retained for local testing.
-    """
+
+def resolve_principal(
+    api_key: str | None = Security(_api_key_header),
+    authorization: str | None = Header(default=None),
+) -> Principal:
     settings = get_settings()
-    if settings.api_key is None and settings.is_production:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Write API is disabled because API_KEY is not configured.",
-        )
-    require_api_key(api_key)
+    bearer = _extract_bearer(authorization)
+    if bearer and settings.use_db:
+        principal = principal_from_session(bearer)
+        if principal is not None:
+            return principal
+
+    if settings.api_key is not None:
+        provided = api_key or ""
+        if hmac.compare_digest(provided.encode(), settings.api_key.encode()):
+            return static_api_key_principal()
+
+    if not settings.is_production and settings.api_key is None:
+        return development_principal()
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing credentials.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
-AuthDep = Annotated[None, Depends(require_api_key)]
-WriteAuthDep = Annotated[None, Depends(require_write_api_key)]
+def require_permission(permission: str):
+    def _dependency(principal: Annotated[Principal, Depends(resolve_principal)]) -> Principal:
+        if not has_permission(principal, permission):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
+        return principal
+
+    return _dependency
+
+
+def require_write_permission(permission: str):
+    def _dependency(principal: Annotated[Principal, Depends(resolve_principal)]) -> Principal:
+        if not has_permission(principal, permission):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
+        return principal
+
+    return _dependency
+
+
+AuthDep = Annotated[Principal, Depends(require_permission("station:read"))]
+DispatchWriteDep = Annotated[Principal, Depends(require_write_permission("dispatch:write"))]
+DispatchApproveDep = Annotated[Principal, Depends(require_write_permission("dispatch:approve"))]
+TelemetryWriteDep = Annotated[Principal, Depends(require_write_permission("telemetry:write"))]
+DeviceWriteDep = Annotated[Principal, Depends(require_write_permission("device:write"))]
+TaskWriteDep = Annotated[Principal, Depends(require_write_permission("task:write"))]
+VppSettleDep = Annotated[Principal, Depends(require_write_permission("vpp:settle"))]
+AuditReadDep = Annotated[Principal, Depends(require_permission("audit:read"))]
+
+
+def _tenant_scope(principal: Principal) -> str | None:
+    return None if principal.is_platform_admin else principal.tenant_id
+
 
 # ---------------------------------------------------------------------------
 # Ops routes (health + metrics – no auth, no version prefix)
@@ -323,22 +395,44 @@ def _build_v1_router(s: Any) -> APIRouter:
     router = APIRouter(tags=["v1"])
     rl = f"{s.rate_limit_per_minute}/minute"
 
+    @router.post("/auth/login", response_model=LoginResponse)
+    @limiter.limit(rl)
+    async def _login(request: Request, body: LoginRequest) -> Any:
+        try:
+            result = authenticate_user(body.email, body.password)
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        principal = result["principal"]
+        return {
+            "access_token": result["access_token"],
+            "token_type": "bearer",
+            "expires_at": result["expires_at"],
+            "principal": _principal_out(principal),
+        }
+
+    @router.get("/auth/me", response_model=PrincipalOut)
+    @limiter.limit(rl)
+    async def _me(request: Request, principal: Annotated[Principal, Depends(resolve_principal)]) -> Any:
+        return _principal_out(principal)
+
     @router.get("/overview", response_model=OverviewResponse)
     @limiter.limit(rl)
     async def _overview(request: Request, _auth: AuthDep) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         return build_overview(repo)
 
     @router.get("/stations", response_model=StationListResponse)
     @limiter.limit(rl)
     async def _stations(request: Request, _auth: AuthDep) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         return {"stations": [station_summary(repo, station) for station in repo.stations]}
 
     @router.get("/stations/{station_id}", response_model=StationDetailResponse)
     @limiter.limit(rl)
     async def _station_detail(request: Request, station_id: str, _auth: AuthDep) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         try:
             return station_detail(repo, station_id)
         except KeyError as exc:
@@ -347,13 +441,13 @@ def _build_v1_router(s: Any) -> APIRouter:
     @router.get("/dispatch", response_model=DispatchResponse)
     @limiter.limit(rl)
     async def _dispatch(request: Request, _auth: AuthDep) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         return build_dispatch(repo)
 
     @router.get("/vpp", response_model=VppResponse)
     @limiter.limit(rl)
     async def _vpp(request: Request, _auth: AuthDep) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         return build_vpp(repo)
 
     @router.get("/roi", response_model=RoiResponse)
@@ -366,18 +460,18 @@ def _build_v1_router(s: Any) -> APIRouter:
         capex_per_kwh: float = Query(default=1150.0, gt=0),
         vpp: bool = Query(default=True),
     ) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         return simulate_roi(repo, capacity_kwh, power_kw, capex_per_kwh, vpp)
 
     @router.get("/audit", response_model=AuditResponse)
     @limiter.limit(rl)
     async def _audit(
         request: Request,
-        _auth: AuthDep,
+        _auth: AuditReadDep,
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         all_entries = list(repo.audit)
         page = all_entries[offset : offset + limit]
         return {
@@ -387,9 +481,11 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.post("/telemetry", response_model=TelemetryIngestResponse, status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(rl)
-    async def _ingest_telemetry(request: Request, body: TelemetryIngestRequest, _auth: WriteAuthDep) -> Any:
+    async def _ingest_telemetry(request: Request, body: TelemetryIngestRequest, _auth: TelemetryWriteDep) -> Any:
         try:
-            return ingest_telemetry(body.model_dump())
+            payload = body.model_dump()
+            payload["actor"] = _auth.subject
+            return ingest_telemetry(payload)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -404,10 +500,10 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         alert_id: str,
         body: AlertAcknowledgeRequest,
-        _auth: WriteAuthDep,
+        _auth: DispatchWriteDep,
     ) -> Any:
         try:
-            return acknowledge_alert(alert_id, body.actor)
+            return acknowledge_alert(alert_id, body.actor or _auth.subject)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -422,13 +518,13 @@ def _build_v1_router(s: Any) -> APIRouter:
     async def _generate_dispatch_recommendations(
         request: Request,
         body: DispatchGenerateRequest,
-        _auth: WriteAuthDep,
+        _auth: DispatchWriteDep,
     ) -> Any:
-        repo = load_repository_from_db()
+        repo = load_repository_from_db(_tenant_scope(_auth))
         dispatch = build_dispatch(repo)
         recommendations = dispatch["recommendations"]
         try:
-            generated = persist_dispatch_recommendations(recommendations, body.actor)
+            generated = persist_dispatch_recommendations(recommendations, body.actor or _auth.subject)
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {"generated": generated, "recommendations": recommendations}
@@ -442,10 +538,10 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         recommendation_id: str,
         body: DispatchStatusRequest,
-        _auth: WriteAuthDep,
+        _auth: DispatchWriteDep,
     ) -> Any:
         try:
-            return update_dispatch_status(recommendation_id, body.status, body.actor, body.reason)
+            return update_dispatch_status(recommendation_id, body.status, body.actor or _auth.subject, body.reason)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except ValueError as exc:
@@ -459,14 +555,163 @@ def _build_v1_router(s: Any) -> APIRouter:
         status_code=status.HTTP_201_CREATED,
     )
     @limiter.limit(rl)
-    async def _persist_roi_simulation(request: Request, body: RoiSimulationRequest, _auth: WriteAuthDep) -> Any:
-        repo = load_repository_from_db()
+    async def _persist_roi_simulation(request: Request, body: RoiSimulationRequest, _auth: DispatchWriteDep) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
         roi = simulate_roi(repo, body.capacity_kwh, body.power_kw, body.capex_per_kwh, body.vpp)
         try:
             simulation_id = persist_roi_simulation(body.station_id, roi, body.model_dump())
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {"id": simulation_id, **roi}
+
+    @router.post(
+        "/protocols/{protocol}/messages",
+        response_model=ProtocolMessageResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    @limiter.limit(rl)
+    async def _protocol_message(
+        request: Request,
+        protocol: str,
+        body: ProtocolMessageRequest,
+        _auth: DeviceWriteDep,
+    ) -> Any:
+        normalized = normalize_protocol_message(protocol, body.message_type, body.payload)
+        try:
+            message = persist_protocol_message(
+                _auth.tenant_id or "t-001",
+                protocol,
+                body.station_id,
+                body.device_id,
+                body.external_id,
+                body.message_type,
+                body.payload | {"normalized": normalized},
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        telemetry_ingested = False
+        if normalized.get("kind") == "telemetry":
+            payload = {
+                "station_id": body.station_id,
+                "timestamp": normalized.get("timestamp"),
+                "load_kw": normalized.get("load_kw", body.payload.get("load_kw", 0)),
+                "pv_kw": normalized.get("pv_kw", body.payload.get("pv_kw", 0)),
+                "grid_kw": normalized.get("grid_kw", body.payload.get("grid_kw", normalized.get("load_kw", 0))),
+                "storage_power_kw": body.payload.get("storage_power_kw", 0),
+                "storage_soc": normalized.get("storage_soc", body.payload.get("storage_soc", 0.5)),
+                "connector_occupied": body.payload.get("connector_occupied", 0),
+                "queue_length": body.payload.get("queue_length", 0),
+                "sessions": body.payload.get("sessions", 0),
+                "energy_kwh": normalized.get("energy_kwh", body.payload.get("energy_kwh", 0)),
+                "revenue": body.payload.get("revenue", 0),
+                "alert_count": body.payload.get("alert_count", 0),
+                "idempotency_key": body.idempotency_key
+                or f"{protocol}:{body.external_id}:{body.message_type}:{normalized.get('timestamp')}",
+                "actor": _auth.subject,
+            }
+            ingest_telemetry(payload)
+            telemetry_ingested = True
+        return {
+            "id": message["id"],
+            "protocol": protocol,
+            "station_id": body.station_id,
+            "device_id": message["device_id"],
+            "status": "accepted",
+            "telemetry_ingested": telemetry_ingested,
+            "task_id": None,
+        }
+
+    @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit(rl)
+    async def _create_task(request: Request, body: TaskCreateRequest, _auth: TaskWriteDep) -> Any:
+        return enqueue_task(
+            _auth.tenant_id or "t-001",
+            body.station_id,
+            body.device_id,
+            body.task_type,
+            body.payload,
+            body.priority,
+            body.idempotency_key,
+        )
+
+    @router.post(
+        "/dispatch/recommendations/{recommendation_id}/approval",
+        response_model=DispatchApprovalResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _request_dispatch_approval(
+        request: Request,
+        recommendation_id: str,
+        body: DispatchApprovalRequest,
+        _auth: DispatchWriteDep,
+    ) -> Any:
+        return request_dispatch_approval(recommendation_id, _auth, body.reason)
+
+    @router.post(
+        "/dispatch/recommendations/{recommendation_id}/approve",
+        response_model=DispatchApprovalResponse,
+    )
+    @limiter.limit(rl)
+    async def _approve_dispatch(
+        request: Request,
+        recommendation_id: str,
+        body: DispatchApprovalRequest,
+        _auth: DispatchApproveDep,
+    ) -> Any:
+        return review_dispatch_approval(recommendation_id, _auth, True, body.reason)
+
+    @router.post(
+        "/dispatch/recommendations/{recommendation_id}/reject",
+        response_model=DispatchApprovalResponse,
+    )
+    @limiter.limit(rl)
+    async def _reject_dispatch(
+        request: Request,
+        recommendation_id: str,
+        body: DispatchApprovalRequest,
+        _auth: DispatchApproveDep,
+    ) -> Any:
+        return review_dispatch_approval(recommendation_id, _auth, False, body.reason)
+
+    @router.post("/edge/receipts", response_model=EdgeReceiptResponse, status_code=status.HTTP_202_ACCEPTED)
+    @limiter.limit(rl)
+    async def _edge_receipt(request: Request, body: EdgeReceiptRequest, _auth: DeviceWriteDep) -> Any:
+        return record_edge_receipt(
+            _auth.tenant_id or "t-001",
+            body.task_id,
+            body.station_id,
+            body.device_id,
+            body.status,
+            body.payload,
+        )
+
+    @router.post("/optimization/runs", response_model=OptimizationRunResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit(rl)
+    async def _optimization_run(request: Request, body: OptimizationRunRequest, _auth: DispatchWriteDep) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        result = solve_dispatch_optimization(
+            repo, _tenant_scope(_auth), body.station_id, body.horizon_hours, body.objective
+        )
+        run_id = persist_optimization_run(
+            _auth.tenant_id or "t-001",
+            body.station_id or "portfolio",
+            body.objective,
+            body.horizon_hours,
+            result["solver"],
+            result["objective_value"],
+            result["inputs"],
+            {"dispatch_plan": result["dispatch_plan"], "constraints": result["constraints"]},
+            _auth.subject,
+        )
+        return {"id": run_id, **result}
+
+    @router.post("/vpp/settlements", response_model=VppSettlementResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit(rl)
+    async def _vpp_settlement(request: Request, body: VppSettlementRequest, _auth: VppSettleDep) -> Any:
+        return settle_vpp_event(
+            body.event_id, body.baseline_kw, body.delivered_kw, body.settled_by or _auth.subject, body.evidence
+        )
 
     return router
 

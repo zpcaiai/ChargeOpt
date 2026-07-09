@@ -13,7 +13,11 @@ ChargeOpt OS is a production-grade Enterprise platform for ultra-fast charging, 
 - Storage ROI simulator (NPV, IRR, payback)
 - VPP resource aggregation and demand-response decomposition
 - Auditable dispatch recommendation records
-- **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
+- Login sessions, RBAC permissions, tenant-scoped repository reads, and Postgres RLS policy foundations
+- OCPP / Modbus / MQTT gateway message normalization and protocol message ledger
+- Async task queue, dispatch approval workflow, edge command receipts, and VPP settlement ledger
+- Constrained discrete MILP-style dispatch optimizer with persisted optimization run evidence
+- **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key/Bearer auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
 
 ## Quick Start (in-memory, no DB)
 
@@ -62,7 +66,7 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 |---|---|---|
 | `ENVIRONMENT` | `development` | `development` \| `staging` \| `production` |
 | `DATABASE_URL` | _(blank)_ | PostgreSQL DSN; blank = in-memory mode |
-| `API_KEY` | _(blank)_ | Shared secret for `X-API-Key` header; blank = auth disabled |
+| `API_KEY` | _(blank)_ | Shared secret for `X-API-Key`; production also supports `/api/v1/auth/login` bearer sessions |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per-IP request cap |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warning` \| `error` |
@@ -82,6 +86,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `001_init.sql` – schema + tables + indexes
 - `002_seed.sql` – reference data + sample records
 - `003_control_plane.sql` – telemetry ingest ledger, dispatch status workflow, persisted ROI simulations, and production seed telemetry
+- `004_industrial_control_plane.sql` – users/sessions/RBAC, tenant RLS policies, protocol devices/messages, task queue, dispatch approvals, edge receipts, optimization runs, and VPP settlements
 
 ## Test
 
@@ -115,10 +120,23 @@ GET /api/v1/dispatch
 GET /api/v1/vpp
 GET /api/v1/roi?capacity_kwh=1200&power_kw=600&capex_per_kwh=1150&vpp=true
 GET /api/v1/audit?limit=50&offset=0
+
+POST /api/v1/auth/login
+GET  /api/v1/auth/me
+POST /api/v1/protocols/{ocpp|modbus|mqtt}/messages
+POST /api/v1/tasks
+POST /api/v1/dispatch/recommendations/{id}/approval
+POST /api/v1/dispatch/recommendations/{id}/approve
+POST /api/v1/dispatch/recommendations/{id}/reject
+POST /api/v1/edge/receipts
+POST /api/v1/optimization/runs
+POST /api/v1/vpp/settlements
 ```
 
 Error responses conform to **RFC 7807** (`application/problem+json`).  
-All `/api/v1/*` endpoints accept optional `X-API-Key` header when `API_KEY` is set.
+Production endpoints require either a valid `Authorization: Bearer <token>` from `/api/v1/auth/login` or a valid `X-API-Key`.
+
+Bootstrap database user after migration `004`: `operator@chargeopt.local` / `ChangeMe!2026`. Rotate or disable this account immediately in a real deployment.
 
 ## CI/CD (GitHub Actions)
 
@@ -138,14 +156,13 @@ GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 - `api/index.py` re-exports the FastAPI `app` for Vercel's ASGI runtime.
 - GitHub Actions runs `python scripts/migrate.py` before production deployment so Neon tables are created/updated automatically on `main` pushes.
 - Set `DATABASE_URL` in both Vercel Production environment variables and GitHub Actions secrets. Vercel uses it at runtime; GitHub Actions uses it to apply migrations before deployment.
-- Set `API_KEY` in production before enabling write APIs. Without it, production write endpoints return `503` and read endpoints remain available.
+- Set `API_KEY` in production for machine-to-machine access, or use `/api/v1/auth/login` for human/operator access.
+- Field equipment must connect through an authenticated gateway that posts OCPP/Modbus/MQTT-normalized payloads to `/api/v1/protocols/{protocol}/messages`; direct charger control remains gated by approval + task queue + edge receipt.
 
 Production URL: **https://chargeopt-os.vercel.app**
 
-## Next Milestones
+## Operational Caveats
 
-1. RBAC + tenant scoping (JWT, per-tenant row-level security).
-2. MQTT/OCPP/Modbus adapters behind gateway interfaces.
-3. Persist forecast, optimisation, and dispatch plan versions.
-4. Replace rule-based engine with MILP/MPC (CVXPY or Pyomo).
-5. Signed command approval, edge validation, local rollback, and execution receipts.
+- The protocol layer is an authenticated gateway API, not a direct vendor cloud connector. Site-specific OCPP brokers, Modbus TCP polling, and MQTT credentials must be configured outside the repository and forward signed payloads into the API.
+- The optimizer is dependency-free and serverless-safe. It is MILP-style discrete constrained search, not a commercial solver integration.
+- GitHub Actions cannot create `DATABASE_URL` automatically without repository secret permissions. Add `DATABASE_URL` under GitHub repository secrets before relying on push-to-production migrations.
