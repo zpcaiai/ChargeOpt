@@ -451,7 +451,7 @@ class VppSettlementRequest(BaseModel):
     event_id: str = Field(min_length=1)
     baseline_kw: float = Field(ge=0)
     delivered_kw: float = Field(ge=0)
-    settled_by: str = Field(min_length=1, max_length=120)
+    settled_by: str | None = Field(default=None, min_length=1, max_length=120)
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 

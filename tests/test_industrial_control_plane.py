@@ -164,6 +164,24 @@ async def test_task_approval_receipt_optimization_and_settlement_endpoints(clien
         )
     assert settlement.status_code == 201
 
+    with patch(
+        "chargeopt.app.settle_vpp_event",
+        return_value={
+            "id": "set-2",
+            "event_id": "vpp-1",
+            "performance_score": 1.0,
+            "gross_revenue": 120,
+            "penalty": 0,
+            "net_revenue": 120,
+        },
+    ) as settle:
+        settlement_default_actor = await client.post(
+            "/api/vpp/settlements",
+            json={"event_id": "vpp-1", "baseline_kw": 1000, "delivered_kw": 1000, "evidence": {}},
+        )
+    assert settlement_default_actor.status_code == 201
+    assert settle.call_args.args[3] == "dev-admin"
+
 
 def test_repository_auth_session_and_settlement_math():
     from chargeopt.repository import authenticate_user, settle_vpp_event
