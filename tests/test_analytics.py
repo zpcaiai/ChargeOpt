@@ -1,5 +1,6 @@
 from chargeopt.analytics import build_dispatch, build_overview, build_vpp, simulate_roi, station_detail
 from chargeopt.data import load_repository
+from chargeopt.revenue_intelligence import build_revenue_diagnostics
 
 
 def test_overview_has_portfolio_metrics():
@@ -51,3 +52,22 @@ def test_roi_case_returns_positive_business_metrics():
     assert roi["annual_net_benefit"] > 0
     assert roi["payback_years"] > 0
     assert "recommendation" in roi
+
+
+def test_revenue_diagnostics_prove_monthly_counterfactual_value():
+    repo = load_repository()
+    diagnostics = build_revenue_diagnostics(repo)
+
+    assert diagnostics["portfolio"]["monthly_net_impact"] > 0
+    assert diagnostics["portfolio"]["annualized_net_impact"] == diagnostics["portfolio"]["monthly_net_impact"] * 12
+    assert len(diagnostics["stations"]) == len(repo.stations)
+    assert diagnostics["moat"]["device_adapter_protocols"] == ["ocpp", "modbus", "mqtt"]
+    assert "counterfactual" in diagnostics["algorithm"]["name"]
+
+
+def test_revenue_diagnostics_can_filter_single_station():
+    repo = load_repository()
+    diagnostics = build_revenue_diagnostics(repo, "st-hq-hongqiao")
+
+    assert diagnostics["scope"]["station_count"] == 1
+    assert diagnostics["stations"][0]["station_id"] == "st-hq-hongqiao"

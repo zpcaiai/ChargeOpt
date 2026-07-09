@@ -11,12 +11,13 @@ ChargeOpt OS is a production-grade Enterprise platform for ultra-fast charging, 
 - Operating cockpit: station economics, demand peaks, storage dispatch, margin
 - Station detail, load forecast, storage plan, dynamic pricing hints, alert triage
 - Storage ROI simulator (NPV, IRR, payback)
+- Revenue diagnostics that compare actual operation with a counterfactual no-EMS baseline and prove monthly profit lift
 - VPP resource aggregation and demand-response decomposition
 - Auditable dispatch recommendation records
 - Login sessions, RBAC permissions, tenant-scoped repository reads, and Postgres RLS policy foundations
 - OCPP / Modbus / MQTT gateway message normalization and protocol message ledger
 - Async task queue, dispatch approval workflow, edge command receipts, and VPP settlement ledger
-- Constrained discrete MILP-style dispatch optimizer with persisted optimization run evidence
+- Risk-constrained rolling MPC/MILP dynamic-programming optimizer with persisted optimization run evidence
 - **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key/Bearer auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
 
 ## Quick Start (in-memory, no DB)
@@ -119,6 +120,7 @@ GET /api/v1/stations/{station_id}
 GET /api/v1/dispatch
 GET /api/v1/vpp
 GET /api/v1/roi?capacity_kwh=1200&power_kw=600&capex_per_kwh=1150&vpp=true
+GET /api/v1/revenue-diagnostics?station_id=st-hq-hongqiao
 GET /api/v1/audit?limit=50&offset=0
 
 POST /api/v1/auth/login
@@ -161,8 +163,24 @@ GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 
 Production URL: **https://chargeopt-os.vercel.app**
 
+## Revenue Proof Engine
+
+The moat metric is not "the algorithm exists"; it is whether ChargeOpt can repeatedly prove:
+
+> Same station, same tariff and operating context, with ChargeOpt vs. without ChargeOpt: monthly profit lift in CNY.
+
+`GET /api/v1/revenue-diagnostics` implements that proof loop:
+
+- Builds a counterfactual no-EMS baseline for each station.
+- Attributes monthly impact across tariff arbitrage, demand-charge reduction, throughput uplift, queue-loss avoidance, VPP revenue, and battery degradation.
+- Reports p90 confidence bands so sales claims are not presented as exact point estimates.
+- Produces a moat scorecard covering operating data hours, device adapters, ROI case count, and monthly profit proof.
+- Supports station filtering for a single-site sales review or monthly customer business review.
+
+The optimizer used by `/api/v1/optimization/runs` is `risk-constrained-mpc-milp-dp-v2`: a serverless-safe rolling-horizon dynamic program over discrete charge/discharge actions. It enforces SOC, transformer, ramp, VPP reserve, degradation, and service-pressure constraints without requiring a heavy commercial solver in Vercel.
+
 ## Operational Caveats
 
 - The protocol layer is an authenticated gateway API, not a direct vendor cloud connector. Site-specific OCPP brokers, Modbus TCP polling, and MQTT credentials must be configured outside the repository and forward signed payloads into the API.
-- The optimizer is dependency-free and serverless-safe. It is MILP-style discrete constrained search, not a commercial solver integration.
+- The optimizer is dependency-free and serverless-safe. It is a MILP/MPC-style dynamic-programming approximation, not a commercial solver integration.
 - GitHub Actions cannot create `DATABASE_URL` automatically without repository secret permissions. Add `DATABASE_URL` under GitHub repository secrets before relying on push-to-production migrations.

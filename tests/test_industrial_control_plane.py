@@ -45,9 +45,10 @@ def test_optimizer_generates_constrained_plan(repo):
 
     result = solve_dispatch_optimization(repo, "t-001", None, 4, "balanced")
 
-    assert result["solver"] == "discrete-milp-search-v1"
+    assert result["solver"] == "risk-constrained-mpc-milp-dp-v2"
     assert len(result["dispatch_plan"]) >= 4
-    assert result["constraints"]["soc_min"] == 0.22
+    assert result["constraints"]["soc_min"] == 0.24
+    assert "shadow_price" in result["dispatch_plan"][0]
 
 
 @pytest.mark.asyncio

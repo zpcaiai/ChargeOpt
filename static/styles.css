@@ -337,6 +337,17 @@ input {
   gap: 10px;
 }
 
+.proof-summary {
+  margin-bottom: 12px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.proof-metrics {
+  margin-bottom: 12px;
+}
+
 .bar-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.6fr) auto;

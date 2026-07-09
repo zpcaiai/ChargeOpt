@@ -53,6 +53,7 @@ from .repository import (
     settle_vpp_event,
     update_dispatch_status,
 )
+from .revenue_intelligence import build_revenue_diagnostics
 from .schemas import (
     AlertAcknowledgeRequest,
     AlertAcknowledgeResponse,
@@ -76,6 +77,7 @@ from .schemas import (
     ProblemDetail,
     ProtocolMessageRequest,
     ProtocolMessageResponse,
+    RevenueDiagnosticResponse,
     RoiResponse,
     RoiSimulationPersistedResponse,
     RoiSimulationRequest,
@@ -462,6 +464,19 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         return simulate_roi(repo, capacity_kwh, power_kw, capex_per_kwh, vpp)
+
+    @router.get("/revenue-diagnostics", response_model=RevenueDiagnosticResponse)
+    @limiter.limit(rl)
+    async def _revenue_diagnostics(
+        request: Request,
+        _auth: AuthDep,
+        station_id: str | None = Query(default=None),
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        try:
+            return build_revenue_diagnostics(repo, station_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @router.get("/audit", response_model=AuditResponse)
     @limiter.limit(rl)

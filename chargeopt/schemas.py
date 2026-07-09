@@ -359,6 +359,20 @@ class RoiSimulationPersistedResponse(RoiResponse):
 
 
 # ---------------------------------------------------------------------------
+# Revenue proof / moat diagnostics
+# ---------------------------------------------------------------------------
+
+
+class RevenueDiagnosticResponse(BaseModel):
+    generated_at: str
+    scope: dict[str, Any]
+    algorithm: dict[str, Any]
+    portfolio: dict[str, Any]
+    stations: list[dict[str, Any]]
+    moat: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Industrial control-plane models
 # ---------------------------------------------------------------------------
 

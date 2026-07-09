@@ -100,6 +100,25 @@ async def test_roi_bad_input_returns_422(client):
 
 
 @pytest.mark.asyncio
+async def test_revenue_diagnostics_endpoint(client):
+    resp = await client.get("/api/revenue-diagnostics")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["portfolio"]["monthly_net_impact"] > 0
+    assert len(body["stations"]) == 3
+    assert body["moat"]["score"] > 0
+
+
+@pytest.mark.asyncio
+async def test_revenue_diagnostics_station_filter(client):
+    resp = await client.get("/api/revenue-diagnostics", params={"station_id": "st-hq-hongqiao"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scope"]["station_count"] == 1
+    assert body["stations"][0]["station_id"] == "st-hq-hongqiao"
+
+
+@pytest.mark.asyncio
 async def test_audit_endpoint(client):
     resp = await client.get("/api/audit")
     assert resp.status_code == 200

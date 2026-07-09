@@ -1,5 +1,6 @@
 const state = {
   overview: null,
+  revenueDiagnostics: null,
   stationDetail: null,
   selectedStationId: null,
   lang: localStorage.getItem("lang") || "zh",
@@ -28,6 +29,7 @@ const TRANSLATIONS = {
     "metric.storage": "储能", "metric.headroom": "余量", "metric.today": "今日",
     "panel.portfolioLoad": "组合负荷", "panel.portfolioLoad.desc": "电网进口、光伏、储能动作及排队压力",
     "panel.savings": "节省潜力", "panel.savings.desc": "来自削峰、储能及排队缓解的月度价值",
+    "panel.proof": "收益证明", "panel.proof.desc": "同一站点在反事实基线下每月多赚/少亏金额",
     "panel.stationPortfolio": "站点组合", "panel.stationPortfolio.desc": "经济健康、利用率、储能状态及VPP就绪度",
     "panel.alerts": "告警", "panel.alerts.desc": "未处理及已确认的运行事件",
     "panel.forecast": "24小时预测", "panel.forecast.desc": "负荷、排队、电价及峰值概率",
@@ -46,6 +48,7 @@ const TRANSLATIONS = {
     "vpp.reliable": "可靠容量", "vpp.requested": "需求量", "vpp.revenue": "收益", "vpp.resources": "资源", "vpp.stations": "站点",
     "live": "实时数据", "stations": "个站点", "generated": "生成于",
     "recommendations": "条建议", "no.alerts": "无告警。",
+    "proof.monthly": "月度净增益", "proof.annual": "年化增益", "proof.confidence": "P90置信区间",
   },
   en: {
     "nav.cockpit": "Cockpit", "nav.cockpit.title": "Operating cockpit",
@@ -65,6 +68,7 @@ const TRANSLATIONS = {
     "metric.storage": "storage", "metric.headroom": "Headroom", "metric.today": "today",
     "panel.portfolioLoad": "Portfolio Load", "panel.portfolioLoad.desc": "Grid import, PV, storage action, and queue pressure",
     "panel.savings": "Savings Potential", "panel.savings.desc": "Monthly value from peak control, storage, and queue relief",
+    "panel.proof": "Profit Proof", "panel.proof.desc": "Monthly profit lift versus the same station counterfactual",
     "panel.stationPortfolio": "Station Portfolio", "panel.stationPortfolio.desc": "Economic health, utilization, storage state, and VPP readiness",
     "panel.alerts": "Alerts", "panel.alerts.desc": "Open issues and acknowledged operating events",
     "panel.forecast": "24h Forecast", "panel.forecast.desc": "Load, queue, price, and peak probability",
@@ -83,6 +87,7 @@ const TRANSLATIONS = {
     "vpp.reliable": "Reliable Capacity", "vpp.requested": "Requested", "vpp.revenue": "Revenue", "vpp.resources": "Resources", "vpp.stations": "stations",
     "live": "Live fixture", "stations": "stations", "generated": "generated",
     "recommendations": "recommendations", "no.alerts": "No alerts.",
+    "proof.monthly": "Monthly net lift", "proof.annual": "Annualized lift", "proof.confidence": "P90 interval",
   },
 };
 
@@ -124,7 +129,7 @@ function toggleLang() {
   state.lang = state.lang === "zh" ? "en" : "zh";
   localStorage.setItem("lang", state.lang);
   applyLang();
-  if (state.overview) { renderOverview(); renderStation(); renderDispatch(); renderRoi(); renderVpp(); }
+  if (state.overview) { renderOverview(); renderStation(); renderDispatch(); renderRoi(); renderVpp(); renderRevenueProof(); }
 }
 
 async function api(path) {
@@ -135,6 +140,7 @@ async function api(path) {
 
 async function loadAll() {
   state.overview = await api("/api/overview");
+  state.revenueDiagnostics = await api("/api/revenue-diagnostics");
   if (!state.selectedStationId) state.selectedStationId = state.overview.stations[0].id;
   state.stationDetail = await api(`/api/stations/${state.selectedStationId}`);
   renderOverview();
@@ -142,6 +148,7 @@ async function loadAll() {
   renderDispatch();
   renderRoi();
   renderVpp();
+  renderRevenueProof();
 }
 
 function renderOverview() {
@@ -167,6 +174,7 @@ function renderOverview() {
     { key: "storage_kw", label: zh ? "储能" : "Storage", color: "#6d28d9" },
   ]);
   renderSavingsBars();
+  renderRevenueProof();
   renderStationRows();
 }
 
@@ -205,6 +213,31 @@ function renderStationRows() {
       renderDispatch();
     });
   });
+}
+
+function renderRevenueProof() {
+  if (!state.revenueDiagnostics) return;
+  const proof = state.revenueDiagnostics;
+  const portfolio = proof.portfolio;
+  const interval = portfolio.confidence_interval;
+  $("proofSummary").textContent = portfolio.proof_statement;
+  $("proofMetrics").innerHTML = `
+    <article class="metric"><span>${t("proof.monthly")}</span><strong>${money(portfolio.monthly_net_impact)}</strong><small>CNY</small></article>
+    <article class="metric"><span>${t("proof.annual")}</span><strong>${money(portfolio.annualized_net_impact)}</strong><small>CNY</small></article>
+    <article class="metric"><span>${t("proof.confidence")}</span><strong>${money(interval.p90_low)}~${money(interval.p90_high)}</strong><small>CNY</small></article>
+    <article class="metric"><span>Moat</span><strong>${proof.moat.score}</strong><small>${proof.moat.data_hours} data hours</small></article>
+  `;
+  $("proofCards").innerHTML = proof.stations.map((item) => `
+    <div class="dispatch-card">
+      <strong>${item.station}</strong>
+      <p>${item.proof_statement}</p>
+      <div class="dispatch-meta">
+        <span class="tag">${t("proof.monthly")} ${money(item.monthly_net_impact)}</span>
+        <span class="tag">${item.profit_lift_percent}%</span>
+        <span class="tag">${item.evidence_grade}</span>
+      </div>
+    </div>
+  `).join("");
 }
 
 function renderStation() {
