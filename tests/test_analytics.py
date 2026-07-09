@@ -71,3 +71,38 @@ def test_revenue_diagnostics_can_filter_single_station():
 
     assert diagnostics["scope"]["station_count"] == 1
     assert diagnostics["stations"][0]["station_id"] == "st-hq-hongqiao"
+
+
+def test_revenue_diagnostics_ignore_non_commercial_device_telemetry():
+    repo = load_repository()
+    sample = repo.station_points("st-hq-hongqiao")[-1]
+    device_only = sample.__class__(
+        station_id=sample.station_id,
+        timestamp=sample.timestamp,
+        load_kw=sample.load_kw,
+        pv_kw=sample.pv_kw,
+        grid_kw=sample.grid_kw,
+        storage_power_kw=sample.storage_power_kw,
+        storage_soc=sample.storage_soc,
+        connector_occupied=sample.connector_occupied,
+        queue_length=sample.queue_length,
+        sessions=0,
+        energy_kwh=sample.energy_kwh,
+        revenue=0.0,
+        alert_count=0,
+    )
+    contaminated = repo.__class__(
+        repo.tenants,
+        repo.regions,
+        repo.tariff_plans,
+        repo.stations,
+        (*repo.telemetry, device_only),
+        repo.alerts,
+        repo.vpp_events,
+        repo.audit,
+    )
+
+    diagnostics = build_revenue_diagnostics(contaminated, "st-hq-hongqiao")
+
+    assert diagnostics["stations"][0]["monthly_net_impact"] > 0
+    assert diagnostics["stations"][0]["operational_kpis"]["non_commercial_telemetry_ignored"] == 1

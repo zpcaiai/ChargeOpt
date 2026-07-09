@@ -36,7 +36,9 @@ def build_revenue_diagnostics(repo: Repository, station_id: str | None = None) -
         "scope": {
             "station_id": station_id,
             "station_count": len(stations),
-            "evidence_window_hours": min(len(repo.station_points(station.id)) for station in stations),
+            "evidence_window_hours": min(
+                len(_commercial_points(repo.station_points(station.id))) for station in stations
+            ),
             "monthly_scale_days": MONTHLY_DAYS,
         },
         "algorithm": {
@@ -60,7 +62,8 @@ def build_revenue_diagnostics(repo: Repository, station_id: str | None = None) -
 
 
 def _station_diagnostic(repo: Repository, station: Station, event_revenue_share: float) -> dict[str, Any]:
-    points = repo.station_points(station.id)
+    raw_points = repo.station_points(station.id)
+    points = _commercial_points(raw_points)
     tariff = repo.tariff_for(station)
     actual_energy_cost = sum(point.grid_kw * tariff.price_at(point.timestamp.hour) for point in points)
     actual_revenue = sum(point.revenue for point in points)
@@ -124,9 +127,16 @@ def _station_diagnostic(repo: Repository, station: Station, event_revenue_share:
             "peak_kw_avoided": round(max(0.0, cf_peak - actual_peak), 1),
             "storage_throughput_kwh": round(sum(abs(point.storage_power_kw) for point in points), 1),
             "counterfactual_queue_hours": round(sum(row["queue_hours"] for row in cf_rows), 1),
+            "commercial_telemetry_hours": len(points),
+            "non_commercial_telemetry_ignored": max(0, len(raw_points) - len(points)),
         },
         "proof_statement": _proof_statement(station.name, monthly_net_impact, confidence_low, top_driver),
     }
+
+
+def _commercial_points(points: list[TelemetryPoint]) -> list[TelemetryPoint]:
+    commercial = [point for point in points if point.energy_kwh > 0 and point.revenue > 0]
+    return commercial or points
 
 
 def _counterfactual_hour(station: Station, point: TelemetryPoint, tariff) -> dict[str, float]:
