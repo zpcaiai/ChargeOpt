@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-
 # ---------------------------------------------------------------------------
 # Helper to build an app with specific env settings
 # ---------------------------------------------------------------------------
@@ -53,9 +52,9 @@ async def test_lifespan_calls_init_and_close_pool():
     cfg.get_settings.cache_clear()
 
     with patch("chargeopt.app.init_pool") as mock_init, patch("chargeopt.app.close_pool") as mock_close:
+
+
         from chargeopt.app import create_app
-        from contextlib import asynccontextmanager
-        import anyio
 
         app = create_app()
         # Drive the full lifespan (startup → yield → shutdown)
@@ -75,8 +74,8 @@ async def test_lifespan_calls_init_and_close_pool():
 
 @pytest.mark.asyncio
 async def test_500_handler_returns_problem_detail():
-    from chargeopt.app import create_app
     from chargeopt import config as cfg
+    from chargeopt.app import create_app
 
     cfg.get_settings.cache_clear()
     app = create_app()
@@ -105,11 +104,10 @@ async def test_500_handler_returns_problem_detail():
 async def test_rate_limit_handler():
     """Verify the RateLimitExceeded exception handler returns 429 with expected body."""
     from slowapi.errors import RateLimitExceeded
-    from slowapi.wrappers import Limit
-    from chargeopt.app import create_app
-    from chargeopt import config as cfg
     from starlette.datastructures import URL
-    from unittest.mock import MagicMock
+
+    from chargeopt import config as cfg
+    from chargeopt.app import create_app
 
     cfg.get_settings.cache_clear()
     app = create_app()
@@ -166,8 +164,8 @@ async def test_hsts_header_in_production():
 
 @pytest.mark.asyncio
 async def test_observability_middleware_reraises_exceptions():
-    from chargeopt.app import create_app
     from chargeopt import config as cfg
+    from chargeopt.app import create_app
 
     cfg.get_settings.cache_clear()
     app = create_app()
@@ -215,8 +213,8 @@ def test_update_gauges_swallows_repo_exception():
 
 @pytest.mark.asyncio
 async def test_health_returns_503_when_db_raises():
-    from chargeopt.app import create_app
     from chargeopt import config as cfg
+    from chargeopt.app import create_app
 
     cfg.get_settings.cache_clear()
     app = create_app()
@@ -289,6 +287,6 @@ def test_main_name_guard():
     """Cover the `if __name__ == '__main__': main()` guard (line 24)."""
     import runpy
 
-    with patch("chargeopt.__main__.main") as mock_main:
+    with patch("uvicorn.run") as mock_run:
         runpy.run_module("chargeopt.__main__", run_name="__main__", alter_sys=True)
-        mock_main.assert_called_once()
+        mock_run.assert_called_once()

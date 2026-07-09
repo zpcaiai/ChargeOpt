@@ -100,9 +100,8 @@ def test_get_connection_raises_without_pool():
     import chargeopt.db as db_module
 
     db_module._pool = None
-    with pytest.raises(RuntimeError, match="not initialised"):
-        with db_module.get_connection():
-            pass
+    with pytest.raises(RuntimeError, match="not initialised"), db_module.get_connection():
+        pass
 
 
 def test_get_connection_yields_conn():

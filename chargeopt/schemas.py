@@ -6,9 +6,10 @@ validates serialisation at the boundary.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # RFC 7807 Problem Details (used for all error responses)
@@ -255,6 +256,80 @@ class RoiResponse(BaseModel):
 class AuditResponse(BaseModel):
     audit: list[AuditEntryOut]
     meta: PageMeta
+
+
+# ---------------------------------------------------------------------------
+# Write-path request/response models
+# ---------------------------------------------------------------------------
+
+
+class TelemetryIngestRequest(BaseModel):
+    station_id: str = Field(min_length=1)
+    timestamp: datetime
+    load_kw: float = Field(ge=0)
+    pv_kw: float = Field(ge=0)
+    grid_kw: float = Field(ge=0)
+    storage_power_kw: float
+    storage_soc: float = Field(ge=0, le=1)
+    connector_occupied: int = Field(ge=0)
+    queue_length: int = Field(ge=0)
+    sessions: int = Field(ge=0)
+    energy_kwh: float = Field(ge=0)
+    revenue: float = Field(ge=0)
+    alert_count: int = Field(ge=0)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=160)
+    actor: str = Field(default="edge-gateway", min_length=1, max_length=120)
+
+
+class TelemetryIngestResponse(BaseModel):
+    station_id: str
+    timestamp: str
+    created: bool
+    idempotency_key: str
+
+
+class AlertAcknowledgeRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=120)
+
+
+class AlertAcknowledgeResponse(BaseModel):
+    id: str
+    acknowledged: bool
+
+
+class DispatchGenerateRequest(BaseModel):
+    actor: str = Field(default="system", min_length=1, max_length=120)
+
+
+class DispatchGenerateResponse(BaseModel):
+    generated: int
+    recommendations: list[dict[str, Any]]
+
+
+DispatchStatus = Literal["pending", "approved", "rejected", "executed", "failed", "rolled_back"]
+
+
+class DispatchStatusRequest(BaseModel):
+    status: DispatchStatus
+    actor: str = Field(min_length=1, max_length=120)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class DispatchStatusResponse(BaseModel):
+    id: str
+    status: DispatchStatus
+
+
+class RoiSimulationRequest(BaseModel):
+    station_id: str | None = None
+    capacity_kwh: float = Field(default=1200.0, gt=0)
+    power_kw: float = Field(default=600.0, gt=0)
+    capex_per_kwh: float = Field(default=1150.0, gt=0)
+    vpp: bool = True
+
+
+class RoiSimulationPersistedResponse(RoiResponse):
+    id: int
 
 
 # ---------------------------------------------------------------------------

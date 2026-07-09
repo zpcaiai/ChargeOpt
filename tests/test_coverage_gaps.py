@@ -9,7 +9,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -106,7 +106,7 @@ def _make_telemetry(station_id, **overrides):
 
     base = dict(
         station_id=station_id,
-        timestamp=datetime(2024, 1, 1, 14, tzinfo=timezone.utc),
+        timestamp=datetime(2024, 1, 1, 14, tzinfo=UTC),
         load_kw=500.0,
         pv_kw=100.0,
         grid_kw=400.0,
@@ -124,7 +124,7 @@ def _make_telemetry(station_id, **overrides):
 
 def _make_repo(station, points):
     """Build a minimal Repository-like mock."""
-    from chargeopt.domain import TariffPeriod, TariffPlan, Tenant, Region, VppEvent, AuditEntry
+    from chargeopt.domain import Region, TariffPeriod, TariffPlan, Tenant, VppEvent
 
     tenant = Tenant("t-1", "ACME", "enterprise")
     region = Region("r-1", "Shanghai", "SGCC")
@@ -135,7 +135,7 @@ def _make_repo(station, points):
     )
     tariff = TariffPlan("tp-1", "TOU", periods, 20.0, 0.06)
     event = VppEvent(
-        "vpp-1", "t-1", "DR", datetime(2024, 1, 1, 18, tzinfo=timezone.utc),
+        "vpp-1", "t-1", "DR", datetime(2024, 1, 1, 18, tzinfo=UTC),
         60, 2000.0, 0.15, "pending"
     )
 
@@ -163,7 +163,7 @@ def test_dispatch_demand_peak_guard_branch():
     points = [
         _make_telemetry(
             station.id,
-            timestamp=datetime(2024, 1, 1, h, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 1, 1, h, tzinfo=UTC),
             grid_kw=950.0,  # high load → low headroom
         )
         for h in range(24)
@@ -172,7 +172,7 @@ def test_dispatch_demand_peak_guard_branch():
 
     result = build_dispatch(repo)
     titles = {r["title"] for r in result["recommendations"]}
-    assert "Demand peak guard" in titles
+    assert "需量峰值防控" in titles
 
 
 def test_dispatch_queue_relief_branch():
@@ -181,15 +181,15 @@ def test_dispatch_queue_relief_branch():
 
     station = _make_station()
     # 24 points, current (last) has queue_length=5 → triggers queue relief
-    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=timezone.utc))
+    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=UTC))
               for h in range(24)]
-    points[-1] = _make_telemetry(station.id, timestamp=datetime(2024, 1, 1, 23, tzinfo=timezone.utc),
+    points[-1] = _make_telemetry(station.id, timestamp=datetime(2024, 1, 1, 23, tzinfo=UTC),
                                  queue_length=5, grid_kw=400.0)
     repo = _make_repo(station, points)
 
     result = build_dispatch(repo)
     titles = {r["title"] for r in result["recommendations"]}
-    assert "Queue relief pricing" in titles
+    assert "排队缓解定价" in titles
 
 
 def test_dispatch_storage_recharge_branch():
@@ -198,11 +198,11 @@ def test_dispatch_storage_recharge_branch():
 
     station = _make_station()
     # current point: low SOC at hour 3 (valley price 0.4 < 0.6)
-    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=timezone.utc))
+    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=UTC))
               for h in range(24)]
     points[-1] = _make_telemetry(
         station.id,
-        timestamp=datetime(2024, 1, 1, 3, tzinfo=timezone.utc),
+        timestamp=datetime(2024, 1, 1, 3, tzinfo=UTC),
         storage_soc=0.25,   # 25% < 32%
         grid_kw=400.0,
     )
@@ -210,7 +210,7 @@ def test_dispatch_storage_recharge_branch():
 
     result = build_dispatch(repo)
     titles = {r["title"] for r in result["recommendations"]}
-    assert "Storage recharge" in titles
+    assert "储能补电" in titles
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ def test_load_from_postgres_all_loaders():
     """Exercise _load_from_postgres (lines 90-110) and all _load_* sub-functions."""
     from chargeopt.repository import _load_from_postgres
 
-    now = datetime(2024, 1, 1, 14, tzinfo=timezone.utc)
+    now = datetime(2024, 1, 1, 14, tzinfo=UTC)
 
     table_data = {
         "tenants": [("t-1", "ACME", "enterprise")],
@@ -291,6 +291,6 @@ def test_to_dt_datetime_branch():
     """Cover repository._to_dt with a datetime value (passthrough)."""
     from chargeopt.repository import _to_dt
 
-    dt = datetime(2024, 6, 1, 12, tzinfo=timezone.utc)
+    dt = datetime(2024, 6, 1, 12, tzinfo=UTC)
     result = _to_dt(dt)
     assert result is dt

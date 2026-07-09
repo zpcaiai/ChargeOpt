@@ -33,16 +33,33 @@ from .analytics import build_dispatch, build_overview, build_vpp, simulate_roi, 
 from .config import get_settings
 from .db import close_pool, health_check, init_pool
 from .logging_config import configure_logging
-from .repository import load_repository_from_db
+from .repository import (
+    acknowledge_alert,
+    ingest_telemetry,
+    load_repository_from_db,
+    persist_dispatch_recommendations,
+    persist_roi_simulation,
+    update_dispatch_status,
+)
 from .schemas import (
+    AlertAcknowledgeRequest,
+    AlertAcknowledgeResponse,
     AuditResponse,
+    DispatchGenerateRequest,
+    DispatchGenerateResponse,
     DispatchResponse,
+    DispatchStatusRequest,
+    DispatchStatusResponse,
     HealthResponse,
     OverviewResponse,
     ProblemDetail,
     RoiResponse,
+    RoiSimulationPersistedResponse,
+    RoiSimulationRequest,
     StationDetailResponse,
     StationListResponse,
+    TelemetryIngestRequest,
+    TelemetryIngestResponse,
     VppResponse,
 )
 
@@ -158,7 +175,7 @@ def create_app(use_lifespan: bool = True) -> FastAPI:
         CORSMiddleware,
         allow_origins=s.cors_origins_list,
         allow_credentials=s.cors_allow_credentials,
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
         allow_headers=["*"],
         expose_headers=[s.request_id_header],
     )
@@ -351,6 +368,90 @@ def _build_v1_router(s: Any) -> APIRouter:
             "meta": {"total": len(all_entries), "limit": limit, "offset": offset},
         }
 
+    @router.post("/telemetry", response_model=TelemetryIngestResponse, status_code=status.HTTP_202_ACCEPTED)
+    @limiter.limit(rl)
+    async def _ingest_telemetry(request: Request, body: TelemetryIngestRequest, _auth: AuthDep) -> Any:
+        try:
+            return ingest_telemetry(body.model_dump())
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.post(
+        "/alerts/{alert_id}/acknowledge",
+        response_model=AlertAcknowledgeResponse,
+    )
+    @limiter.limit(rl)
+    async def _acknowledge_alert(
+        request: Request,
+        alert_id: str,
+        body: AlertAcknowledgeRequest,
+        _auth: AuthDep,
+    ) -> Any:
+        try:
+            return acknowledge_alert(alert_id, body.actor)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.post(
+        "/dispatch/recommendations/generate",
+        response_model=DispatchGenerateResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _generate_dispatch_recommendations(
+        request: Request,
+        body: DispatchGenerateRequest,
+        _auth: AuthDep,
+    ) -> Any:
+        repo = load_repository_from_db()
+        dispatch = build_dispatch(repo)
+        recommendations = dispatch["recommendations"]
+        try:
+            generated = persist_dispatch_recommendations(recommendations, body.actor)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        return {"generated": generated, "recommendations": recommendations}
+
+    @router.patch(
+        "/dispatch/recommendations/{recommendation_id}",
+        response_model=DispatchStatusResponse,
+    )
+    @limiter.limit(rl)
+    async def _update_dispatch_recommendation(
+        request: Request,
+        recommendation_id: str,
+        body: DispatchStatusRequest,
+        _auth: AuthDep,
+    ) -> Any:
+        try:
+            return update_dispatch_status(recommendation_id, body.status, body.actor, body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.post(
+        "/roi/simulations",
+        response_model=RoiSimulationPersistedResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _persist_roi_simulation(request: Request, body: RoiSimulationRequest, _auth: AuthDep) -> Any:
+        repo = load_repository_from_db()
+        roi = simulate_roi(repo, body.capacity_kwh, body.power_kw, body.capex_per_kwh, body.vpp)
+        try:
+            simulation_id = persist_roi_simulation(body.station_id, roi, body.model_dump())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        return {"id": simulation_id, **roi}
+
     return router
 
 
+app = create_app()

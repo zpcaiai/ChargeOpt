@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import datetime
 from threading import Lock
+from uuid import uuid4
 
 from .config import get_settings
 from .data import Repository, load_repository
@@ -240,3 +241,251 @@ def _to_dt(value: object) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value))
+
+
+# ---------------------------------------------------------------------------
+# Write-path operations
+# ---------------------------------------------------------------------------
+
+
+def append_audit(actor: str, action: str, target: str, detail: str) -> str:
+    """Persist an audit entry and return its generated ID."""
+    audit_id = f"au-{uuid4().hex}"
+    with get_connection() as conn, conn.transaction():
+        conn.execute(
+            """
+                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
+                VALUES (%s, now(), %s, %s, %s, %s)
+                """,
+            (audit_id, actor, action, target, detail),
+        )
+    invalidate_repository_cache()
+    return audit_id
+
+
+def ingest_telemetry(payload: dict) -> dict[str, object]:
+    """Upsert a telemetry point with idempotency tracking."""
+    station_id = payload["station_id"]
+    timestamp = payload["timestamp"]
+    timestamp_key = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
+    idempotency_key = payload.get("idempotency_key") or f"{station_id}:{timestamp_key}"
+    actor = payload.get("actor") or "edge-gateway"
+
+    with get_connection() as conn, conn.transaction():
+        existing = conn.execute(
+            "SELECT 1 FROM chargeopt.telemetry_ingest_log WHERE idempotency_key = %s",
+            (idempotency_key,),
+        ).fetchone()
+        conn.execute(
+            """
+                INSERT INTO chargeopt.telemetry_points (
+                    station_id, timestamp, load_kw, pv_kw, grid_kw, storage_power_kw, storage_soc,
+                    connector_occupied, queue_length, sessions, energy_kwh, revenue, alert_count
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (station_id, timestamp) DO UPDATE SET
+                    load_kw = EXCLUDED.load_kw,
+                    pv_kw = EXCLUDED.pv_kw,
+                    grid_kw = EXCLUDED.grid_kw,
+                    storage_power_kw = EXCLUDED.storage_power_kw,
+                    storage_soc = EXCLUDED.storage_soc,
+                    connector_occupied = EXCLUDED.connector_occupied,
+                    queue_length = EXCLUDED.queue_length,
+                    sessions = EXCLUDED.sessions,
+                    energy_kwh = EXCLUDED.energy_kwh,
+                    revenue = EXCLUDED.revenue,
+                    alert_count = EXCLUDED.alert_count
+                """,
+            (
+                station_id,
+                timestamp,
+                payload["load_kw"],
+                payload["pv_kw"],
+                payload["grid_kw"],
+                payload["storage_power_kw"],
+                payload["storage_soc"],
+                payload["connector_occupied"],
+                payload["queue_length"],
+                payload["sessions"],
+                payload["energy_kwh"],
+                payload["revenue"],
+                payload["alert_count"],
+            ),
+        )
+        conn.execute(
+            """
+                INSERT INTO chargeopt.telemetry_ingest_log (
+                    idempotency_key, station_id, telemetry_timestamp, actor
+                )
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                """,
+            (idempotency_key, station_id, timestamp, actor),
+        )
+        conn.execute(
+            """
+                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
+                VALUES (%s, now(), %s, 'telemetry.ingested', %s, %s)
+                """,
+            (
+                f"au-{uuid4().hex}",
+                actor,
+                station_id,
+                f"Telemetry point {timestamp_key} ingested with key {idempotency_key}.",
+            ),
+        )
+    invalidate_repository_cache()
+    return {
+        "station_id": station_id,
+        "timestamp": timestamp_key,
+        "created": existing is None,
+        "idempotency_key": idempotency_key,
+    }
+
+
+def acknowledge_alert(alert_id: str, actor: str) -> dict[str, object]:
+    """Acknowledge an alert and audit the action."""
+    with get_connection() as conn, conn.transaction():
+        cursor = conn.execute(
+            "UPDATE chargeopt.alerts SET acknowledged = true WHERE id = %s",
+            (alert_id,),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Unknown alert_id: {alert_id}")
+        conn.execute(
+            """
+                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
+                VALUES (%s, now(), %s, 'alert.acknowledged', %s, 'Alert acknowledged.')
+                """,
+            (f"au-{uuid4().hex}", actor, alert_id),
+        )
+    invalidate_repository_cache()
+    return {"id": alert_id, "acknowledged": True}
+
+
+def persist_dispatch_recommendations(recommendations: list[dict], actor: str) -> int:
+    """Persist generated dispatch recommendations without overwriting review status."""
+    from psycopg.types.json import Json
+
+    with get_connection() as conn, conn.transaction():
+        for item in recommendations:
+            conn.execute(
+                """
+                    INSERT INTO chargeopt.dispatch_recommendations (
+                        id, station_id, title, risk, action, value, dispatch_window,
+                        mode, approval, rationale, command_payload
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        risk = EXCLUDED.risk,
+                        action = EXCLUDED.action,
+                        value = EXCLUDED.value,
+                        dispatch_window = EXCLUDED.dispatch_window,
+                        mode = EXCLUDED.mode,
+                        approval = EXCLUDED.approval,
+                        rationale = EXCLUDED.rationale,
+                        command_payload = EXCLUDED.command_payload,
+                        updated_at = now()
+                    """,
+                (
+                    item["id"],
+                    item["station_id"],
+                    item["title"],
+                    item["risk"],
+                    item["action"],
+                    item["value"],
+                    item["window"],
+                    item["mode"],
+                    item["approval"],
+                    item["rationale"],
+                    Json(item),
+                ),
+            )
+        conn.execute(
+            """
+                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
+                VALUES (%s, now(), %s, 'dispatch.generated', 'dispatch_recommendations', %s)
+                """,
+            (f"au-{uuid4().hex}", actor, f"Persisted {len(recommendations)} dispatch recommendations."),
+        )
+    invalidate_repository_cache()
+    return len(recommendations)
+
+
+def update_dispatch_status(recommendation_id: str, status: str, actor: str, reason: str | None) -> dict[str, str]:
+    """Approve/reject/execute a persisted dispatch recommendation."""
+    allowed = {"pending", "approved", "rejected", "executed", "failed", "rolled_back"}
+    if status not in allowed:
+        raise ValueError(f"Invalid dispatch status: {status}")
+
+    with get_connection() as conn, conn.transaction():
+        cursor = conn.execute(
+            """
+                UPDATE chargeopt.dispatch_recommendations
+                SET status = %s,
+                    reviewed_by = %s,
+                    reviewed_at = now(),
+                    review_reason = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+            (status, actor, reason, recommendation_id),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
+        conn.execute(
+            """
+                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
+                VALUES (%s, now(), %s, 'dispatch.status_changed', %s, %s)
+                """,
+            (f"au-{uuid4().hex}", actor, recommendation_id, reason or f"Status changed to {status}."),
+        )
+    invalidate_repository_cache()
+    return {"id": recommendation_id, "status": status}
+
+
+def persist_roi_simulation(station_id: str | None, roi: dict, inputs: dict) -> int:
+    """Persist an ROI simulation and return its database ID."""
+    from psycopg.types.json import Json
+
+    with get_connection() as conn, conn.transaction():
+        row = conn.execute(
+            """
+                INSERT INTO chargeopt.roi_simulations (
+                    station_id, capacity_kwh, power_kw, capex,
+                    annual_demand_savings, annual_arbitrage, annual_vpp_revenue,
+                    annual_degradation_cost, annual_maintenance, annual_net_benefit,
+                    payback_years, irr_percent, npv_10y, recommendation, inputs
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+            (
+                station_id,
+                roi["capacity_kwh"],
+                roi["power_kw"],
+                roi["capex"],
+                roi["annual_demand_savings"],
+                roi["annual_arbitrage"],
+                roi["annual_vpp_revenue"],
+                roi["annual_degradation_cost"],
+                roi["annual_maintenance"],
+                roi["annual_net_benefit"],
+                roi["payback_years"],
+                roi["irr"],
+                roi["npv_10y"],
+                roi["recommendation"],
+                Json(inputs),
+            ),
+        ).fetchone()
+        simulation_id = int(row[0])
+        conn.execute(
+            """
+                INSERT INTO chargeopt.audit_entries (id, timestamp, actor, action, target, detail)
+                VALUES (%s, now(), 'system', 'roi.persisted', %s, %s)
+                """,
+            (f"au-{uuid4().hex}", station_id or "portfolio", f"ROI simulation {simulation_id} persisted."),
+        )
+    invalidate_repository_cache()
+    return simulation_id

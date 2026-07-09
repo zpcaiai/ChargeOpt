@@ -9,11 +9,12 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Generator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    import psycopg
+try:  # optional at import time for environments without DB extras
     from psycopg_pool import ConnectionPool
+except Exception:  # pragma: no cover - exercised when DB extras are absent
+    ConnectionPool = None  # type: ignore[assignment]
 
 from .config import get_settings
 
@@ -31,7 +32,8 @@ def init_pool() -> None:
         return
     if _pool is not None:
         return
-    from psycopg_pool import ConnectionPool  # lazy – requires libpq
+    if ConnectionPool is None:
+        raise RuntimeError("psycopg_pool is required when DATABASE_URL is configured.")
     _pool = ConnectionPool(
         conninfo=settings.database_url,  # type: ignore[arg-type]
         min_size=settings.db_pool_min,
@@ -58,6 +60,10 @@ def close_pool() -> None:
 def get_connection() -> Generator:
     """Yield a checked-out connection from the pool."""
     if _pool is None:
+        # Vercel serverless does not run ASGI lifespan reliably for every cold
+        # start, so initialise lazily on first DB use as a safety net.
+        init_pool()
+    if _pool is None:
         raise RuntimeError("Connection pool is not initialised.  Call init_pool() first.")
     with _pool.connection() as conn:
         yield conn
@@ -65,6 +71,8 @@ def get_connection() -> Generator:
 
 def health_check() -> dict[str, object]:
     """Return a health dict; raises if the DB is unreachable."""
+    if _pool is None:
+        init_pool()
     if _pool is None:
         return {"db": "disabled", "pool_available": None}
     stats = _pool.get_stats()
