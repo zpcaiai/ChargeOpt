@@ -253,7 +253,24 @@ def require_api_key(api_key: str | None = Security(_api_key_header)) -> None:
         )
 
 
+def require_write_api_key(api_key: str | None = Security(_api_key_header)) -> None:
+    """Write-path dependency.
+
+    In production, writes must not be available unless an API key has been
+    explicitly configured. In development, the same optional-auth behaviour as
+    read endpoints is retained for local testing.
+    """
+    settings = get_settings()
+    if settings.api_key is None and settings.is_production:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Write API is disabled because API_KEY is not configured.",
+        )
+    require_api_key(api_key)
+
+
 AuthDep = Annotated[None, Depends(require_api_key)]
+WriteAuthDep = Annotated[None, Depends(require_write_api_key)]
 
 # ---------------------------------------------------------------------------
 # Ops routes (health + metrics – no auth, no version prefix)
@@ -370,7 +387,7 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.post("/telemetry", response_model=TelemetryIngestResponse, status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(rl)
-    async def _ingest_telemetry(request: Request, body: TelemetryIngestRequest, _auth: AuthDep) -> Any:
+    async def _ingest_telemetry(request: Request, body: TelemetryIngestRequest, _auth: WriteAuthDep) -> Any:
         try:
             return ingest_telemetry(body.model_dump())
         except KeyError as exc:
@@ -387,7 +404,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         alert_id: str,
         body: AlertAcknowledgeRequest,
-        _auth: AuthDep,
+        _auth: WriteAuthDep,
     ) -> Any:
         try:
             return acknowledge_alert(alert_id, body.actor)
@@ -405,7 +422,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     async def _generate_dispatch_recommendations(
         request: Request,
         body: DispatchGenerateRequest,
-        _auth: AuthDep,
+        _auth: WriteAuthDep,
     ) -> Any:
         repo = load_repository_from_db()
         dispatch = build_dispatch(repo)
@@ -425,7 +442,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         recommendation_id: str,
         body: DispatchStatusRequest,
-        _auth: AuthDep,
+        _auth: WriteAuthDep,
     ) -> Any:
         try:
             return update_dispatch_status(recommendation_id, body.status, body.actor, body.reason)
@@ -442,7 +459,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         status_code=status.HTTP_201_CREATED,
     )
     @limiter.limit(rl)
-    async def _persist_roi_simulation(request: Request, body: RoiSimulationRequest, _auth: AuthDep) -> Any:
+    async def _persist_roi_simulation(request: Request, body: RoiSimulationRequest, _auth: WriteAuthDep) -> Any:
         repo = load_repository_from_db()
         roi = simulate_roi(repo, body.capacity_kwh, body.power_kw, body.capex_per_kwh, body.vpp)
         try:

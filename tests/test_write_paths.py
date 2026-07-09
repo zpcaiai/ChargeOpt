@@ -45,6 +45,42 @@ async def test_write_endpoint_returns_503_without_db(client):
 
 
 @pytest.mark.asyncio
+async def test_write_endpoint_disabled_in_production_without_api_key(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from chargeopt import config as cfg
+    from chargeopt.app import create_app
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("API_KEY", raising=False)
+    cfg.get_settings.cache_clear()
+    try:
+        app = create_app()
+        payload = {
+            "station_id": "st-hq-hongqiao",
+            "timestamp": "2026-07-09T12:00:00+08:00",
+            "load_kw": 1200,
+            "pv_kw": 50,
+            "grid_kw": 1150,
+            "storage_power_kw": 0,
+            "storage_soc": 0.65,
+            "connector_occupied": 12,
+            "queue_length": 1,
+            "sessions": 8,
+            "energy_kwh": 1080,
+            "revenue": 1600,
+            "alert_count": 0,
+            "idempotency_key": "test-key-prod-telemetry",
+        }
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.post("/api/telemetry", json=payload)
+        assert resp.status_code == 503
+        assert "API_KEY" in resp.json()["detail"]
+    finally:
+        cfg.get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_telemetry_ingest_endpoint_success(client):
     payload = {
         "station_id": "st-hq-hongqiao",
