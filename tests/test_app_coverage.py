@@ -52,8 +52,6 @@ async def test_lifespan_calls_init_and_close_pool():
     cfg.get_settings.cache_clear()
 
     with patch("chargeopt.app.init_pool") as mock_init, patch("chargeopt.app.close_pool") as mock_close:
-
-
         from chargeopt.app import create_app
 
         app = create_app()
@@ -127,6 +125,7 @@ async def test_rate_limit_handler():
 
     assert response.status_code == 429
     import json
+
     body = json.loads(response.body)
     assert body["error"] == "rate_limit_exceeded"
     cfg.get_settings.cache_clear()

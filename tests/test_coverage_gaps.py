@@ -24,10 +24,10 @@ def test_tariff_period_midnight_crossing():
 
     # 22:00 – 06:00 (crosses midnight)
     p = TariffPeriod("night", 22, 6, 0.3)
-    assert p.contains(23) is True   # after 22
-    assert p.contains(0) is True    # midnight
-    assert p.contains(5) is True    # before 6
-    assert p.contains(6) is False   # end exclusive
+    assert p.contains(23) is True  # after 22
+    assert p.contains(0) is True  # midnight
+    assert p.contains(5) is True  # before 6
+    assert p.contains(6) is False  # end exclusive
     assert p.contains(12) is False  # daytime
 
 
@@ -134,10 +134,7 @@ def _make_repo(station, points):
         TariffPeriod("off-peak", 22, 24, 0.6),
     )
     tariff = TariffPlan("tp-1", "TOU", periods, 20.0, 0.06)
-    event = VppEvent(
-        "vpp-1", "t-1", "DR", datetime(2024, 1, 1, 18, tzinfo=UTC),
-        60, 2000.0, 0.15, "pending"
-    )
+    event = VppEvent("vpp-1", "t-1", "DR", datetime(2024, 1, 1, 18, tzinfo=UTC), 60, 2000.0, 0.15, "pending")
 
     mock = MagicMock()
     mock.stations = (station,)
@@ -181,10 +178,10 @@ def test_dispatch_queue_relief_branch():
 
     station = _make_station()
     # 24 points, current (last) has queue_length=5 → triggers queue relief
-    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=UTC))
-              for h in range(24)]
-    points[-1] = _make_telemetry(station.id, timestamp=datetime(2024, 1, 1, 23, tzinfo=UTC),
-                                 queue_length=5, grid_kw=400.0)
+    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=UTC)) for h in range(24)]
+    points[-1] = _make_telemetry(
+        station.id, timestamp=datetime(2024, 1, 1, 23, tzinfo=UTC), queue_length=5, grid_kw=400.0
+    )
     repo = _make_repo(station, points)
 
     result = build_dispatch(repo)
@@ -198,12 +195,11 @@ def test_dispatch_storage_recharge_branch():
 
     station = _make_station()
     # current point: low SOC at hour 3 (valley price 0.4 < 0.6)
-    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=UTC))
-              for h in range(24)]
+    points = [_make_telemetry(station.id, timestamp=datetime(2024, 1, 1, h, tzinfo=UTC)) for h in range(24)]
     points[-1] = _make_telemetry(
         station.id,
         timestamp=datetime(2024, 1, 1, 3, tzinfo=UTC),
-        storage_soc=0.25,   # 25% < 32%
+        storage_soc=0.25,  # 25% < 32%
         grid_kw=400.0,
     )
     repo = _make_repo(station, points)
@@ -247,14 +243,30 @@ def test_load_from_postgres_all_loaders():
         "regions": [("r-1", "Shanghai", "SGCC")],
         "tariff_plans": [("tp-1", "TOU", 20.0, 0.06)],
         "tariff_periods": [("tp-1", "peak", 8, 22, 1.2)],
-        "stations": [(
-            "st-1", "t-1", "r-1", "Station A", "ultra_fast", "1 Rd",
-            31.2, 121.5, 1000.0, 10, 20, 250.0, 1200.0, 600.0, 200.0,
-            "tp-1", 50000.0, 0.97, "auto"
-        )],
-        "telemetry_points": [(
-            "st-1", now, 500.0, 100.0, 400.0, 0.0, 0.6, 10, 2, 10, 5.0, 300.0, 0
-        )],
+        "stations": [
+            (
+                "st-1",
+                "t-1",
+                "r-1",
+                "Station A",
+                "ultra_fast",
+                "1 Rd",
+                31.2,
+                121.5,
+                1000.0,
+                10,
+                20,
+                250.0,
+                1200.0,
+                600.0,
+                200.0,
+                "tp-1",
+                50000.0,
+                0.97,
+                "auto",
+            )
+        ],
+        "telemetry_points": [("st-1", now, 500.0, 100.0, 400.0, 0.0, 0.6, 10, 2, 10, 5.0, 300.0, 0)],
         "alerts": [("al-1", "st-1", now, "high", "Test", "Detail", False)],
         "vpp_events": [("vpp-1", "t-1", "DR", now, 60, 2000.0, 0.15, "pending")],
         "audit_entries": [("au-1", now, "system", "dispatch", "st-1", "ok")],
