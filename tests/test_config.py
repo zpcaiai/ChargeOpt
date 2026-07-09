@@ -54,3 +54,13 @@ def test_log_level_and_debug_fields(monkeypatch):
     s = Settings()
     assert s.log_level == "debug"
     assert s.debug is True
+
+
+def test_vercel_production_detection(monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    from chargeopt.config import Settings
+
+    s = Settings()
+    assert s.is_serverless is True
+    assert s.is_production is True

@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
     workers: int = Field(default=1, ge=1, le=32)
     log_level: Literal["debug", "info", "warning", "error", "critical"] = "info"
+    vercel: str | None = None
+    vercel_env: str | None = None
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str | None = None
@@ -59,11 +61,15 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
-        return self.environment == "production"
+        return self.environment == "production" or self.vercel_env == "production"
 
     @property
     def use_db(self) -> bool:
         return self.database_url is not None
+
+    @property
+    def is_serverless(self) -> bool:
+        return self.vercel is not None
 
 
 @lru_cache(maxsize=1)

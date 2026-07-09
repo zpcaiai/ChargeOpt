@@ -38,5 +38,9 @@ try:
     async def _root():
         return FileResponse(os.path.join(_static_dir, "index.html"))
 
+    @app.head("/", include_in_schema=False)
+    async def _root_head():
+        return FileResponse(os.path.join(_static_dir, "index.html"))
+
 except Exception:
     _boot_tb = traceback.format_exc()

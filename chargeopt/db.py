@@ -30,6 +30,9 @@ def init_pool() -> None:
     if not settings.use_db:
         logger.info("DATABASE_URL not set – running in in-memory mode.")
         return
+    if settings.is_serverless:
+        logger.info("Serverless runtime detected – using direct pooled-endpoint connections.")
+        return
     if _pool is not None:
         return
     if ConnectionPool is None:
@@ -59,6 +62,17 @@ def close_pool() -> None:
 @contextlib.contextmanager
 def get_connection() -> Generator:
     """Yield a checked-out connection from the pool."""
+    settings = get_settings()
+    if settings.use_db and settings.is_serverless:
+        import psycopg
+
+        with psycopg.connect(
+            settings.database_url,
+            connect_timeout=settings.db_connect_timeout,
+            options="-c search_path=chargeopt,public",
+        ) as conn:
+            yield conn
+        return
     if _pool is None:
         # Vercel serverless does not run ASGI lifespan reliably for every cold
         # start, so initialise lazily on first DB use as a safety net.
@@ -71,6 +85,11 @@ def get_connection() -> Generator:
 
 def health_check() -> dict[str, object]:
     """Return a health dict; raises if the DB is unreachable."""
+    settings = get_settings()
+    if settings.use_db and settings.is_serverless:
+        with get_connection() as conn:
+            conn.execute("SELECT 1")
+        return {"db": "ok", "pool_available": None, "pool_size": None}
     if _pool is None:
         init_pool()
     if _pool is None:

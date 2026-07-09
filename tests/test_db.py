@@ -34,6 +34,20 @@ def test_init_pool_no_op_without_database_url(monkeypatch):
     get_settings.cache_clear()
 
 
+def test_init_pool_no_pool_in_serverless(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
+    monkeypatch.setenv("VERCEL", "1")
+    from chargeopt.config import get_settings
+
+    get_settings.cache_clear()
+    import chargeopt.db as db_module
+
+    db_module.init_pool()
+    assert db_module._pool is None
+    monkeypatch.delenv("VERCEL", raising=False)
+    get_settings.cache_clear()
+
+
 def test_init_pool_creates_pool(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
     from chargeopt.config import get_settings
@@ -115,6 +129,26 @@ def test_get_connection_yields_conn():
 
     with db_module.get_connection() as conn:
         assert conn is mock_conn
+
+
+def test_get_connection_serverless_direct(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake/fake")
+    monkeypatch.setenv("VERCEL", "1")
+    from chargeopt.config import get_settings
+
+    get_settings.cache_clear()
+    import chargeopt.db as db_module
+
+    mock_conn = MagicMock()
+    mock_connect = MagicMock()
+    mock_connect.return_value.__enter__ = lambda s: mock_conn
+    mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+    with patch("psycopg.connect", mock_connect), db_module.get_connection() as conn:
+        assert conn is mock_conn
+
+    mock_connect.assert_called_once()
+    monkeypatch.delenv("VERCEL", raising=False)
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
