@@ -65,7 +65,7 @@ class Settings(BaseSettings):
 
     @property
     def use_db(self) -> bool:
-        return self.database_url is not None
+        return bool(self.database_url)
 
     @property
     def is_serverless(self) -> bool:

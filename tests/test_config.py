@@ -27,6 +27,14 @@ def test_settings_from_env(monkeypatch):
     assert s.api_key == "my-secret"
 
 
+def test_empty_database_url_disables_db(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "")
+    from chargeopt.config import Settings
+
+    s = Settings()
+    assert s.use_db is False
+
+
 def test_cors_origins_parsed_from_string(monkeypatch):
     monkeypatch.setenv("CORS_ORIGINS", "https://app.example.com,https://admin.example.com")
     from chargeopt.config import Settings
