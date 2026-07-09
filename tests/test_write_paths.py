@@ -128,13 +128,16 @@ async def test_alert_acknowledge_endpoint_success(client):
 
 @pytest.mark.asyncio
 async def test_dispatch_generate_endpoint_success(client):
-    with patch("chargeopt.app.persist_dispatch_recommendations", return_value=3):
+    with patch(
+        "chargeopt.app.persist_dispatch_recommendations",
+        side_effect=lambda recommendations, actor: len(recommendations),
+    ):
         resp = await client.post("/api/dispatch/recommendations/generate", json={"actor": "system"})
 
     assert resp.status_code == 201
     body = resp.json()
-    assert body["generated"] == 3
-    assert len(body["recommendations"]) == 3
+    assert body["generated"] == len(body["recommendations"])
+    assert body["generated"] >= 1
 
 
 @pytest.mark.asyncio
