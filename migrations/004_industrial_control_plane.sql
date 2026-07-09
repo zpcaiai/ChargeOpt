@@ -202,34 +202,34 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'chargeopt' AND tablename = 'stations' AND policyname = 'tenant_isolation_stations') THEN
         CREATE POLICY tenant_isolation_stations ON chargeopt.stations
-            USING (current_setting('chargeopt.tenant_id', true) IN ('', '*') OR tenant_id = current_setting('chargeopt.tenant_id', true));
+            USING (COALESCE(current_setting('chargeopt.tenant_id', true), '*') IN ('', '*') OR tenant_id = current_setting('chargeopt.tenant_id', true));
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'chargeopt' AND tablename = 'telemetry_points' AND policyname = 'tenant_isolation_telemetry') THEN
         CREATE POLICY tenant_isolation_telemetry ON chargeopt.telemetry_points
             USING (
-                current_setting('chargeopt.tenant_id', true) IN ('', '*')
+                COALESCE(current_setting('chargeopt.tenant_id', true), '*') IN ('', '*')
                 OR EXISTS (SELECT 1 FROM chargeopt.stations s WHERE s.id = station_id AND s.tenant_id = current_setting('chargeopt.tenant_id', true))
             );
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'chargeopt' AND tablename = 'alerts' AND policyname = 'tenant_isolation_alerts') THEN
         CREATE POLICY tenant_isolation_alerts ON chargeopt.alerts
             USING (
-                current_setting('chargeopt.tenant_id', true) IN ('', '*')
+                COALESCE(current_setting('chargeopt.tenant_id', true), '*') IN ('', '*')
                 OR EXISTS (SELECT 1 FROM chargeopt.stations s WHERE s.id = station_id AND s.tenant_id = current_setting('chargeopt.tenant_id', true))
             );
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'chargeopt' AND tablename = 'vpp_events' AND policyname = 'tenant_isolation_vpp_events') THEN
         CREATE POLICY tenant_isolation_vpp_events ON chargeopt.vpp_events
-            USING (current_setting('chargeopt.tenant_id', true) IN ('', '*') OR tenant_id = current_setting('chargeopt.tenant_id', true));
+            USING (COALESCE(current_setting('chargeopt.tenant_id', true), '*') IN ('', '*') OR tenant_id = current_setting('chargeopt.tenant_id', true));
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'chargeopt' AND tablename = 'dispatch_recommendations' AND policyname = 'tenant_isolation_dispatch_recommendations') THEN
         CREATE POLICY tenant_isolation_dispatch_recommendations ON chargeopt.dispatch_recommendations
-            USING (current_setting('chargeopt.tenant_id', true) IN ('', '*') OR tenant_id = current_setting('chargeopt.tenant_id', true));
+            USING (COALESCE(current_setting('chargeopt.tenant_id', true), '*') IN ('', '*') OR tenant_id = current_setting('chargeopt.tenant_id', true));
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'chargeopt' AND tablename = 'roi_simulations' AND policyname = 'tenant_isolation_roi_simulations') THEN
         CREATE POLICY tenant_isolation_roi_simulations ON chargeopt.roi_simulations
             USING (
-                current_setting('chargeopt.tenant_id', true) IN ('', '*')
+                COALESCE(current_setting('chargeopt.tenant_id', true), '*') IN ('', '*')
                 OR station_id IS NULL
                 OR EXISTS (SELECT 1 FROM chargeopt.stations s WHERE s.id = station_id AND s.tenant_id = current_setting('chargeopt.tenant_id', true))
             );
@@ -258,7 +258,7 @@ BEGIN
               AND policyname = 'tenant_isolation_' || table_name
         ) THEN
             EXECUTE format(
-                'CREATE POLICY %I ON chargeopt.%I USING (current_setting(''chargeopt.tenant_id'', true) IN ('''', ''*'') OR tenant_id = current_setting(''chargeopt.tenant_id'', true))',
+                'CREATE POLICY %I ON chargeopt.%I USING (COALESCE(current_setting(''chargeopt.tenant_id'', true), ''*'') IN ('''', ''*'') OR tenant_id = current_setting(''chargeopt.tenant_id'', true))',
                 'tenant_isolation_' || table_name,
                 table_name
             );

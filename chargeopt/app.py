@@ -624,15 +624,18 @@ def _build_v1_router(s: Any) -> APIRouter:
     @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
     async def _create_task(request: Request, body: TaskCreateRequest, _auth: TaskWriteDep) -> Any:
-        return enqueue_task(
-            _auth.tenant_id or "t-001",
-            body.station_id,
-            body.device_id,
-            body.task_type,
-            body.payload,
-            body.priority,
-            body.idempotency_key,
-        )
+        try:
+            return enqueue_task(
+                _auth.tenant_id or "t-001",
+                body.station_id,
+                body.device_id,
+                body.task_type,
+                body.payload,
+                body.priority,
+                body.idempotency_key,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @router.post(
         "/dispatch/recommendations/{recommendation_id}/approval",
@@ -646,7 +649,10 @@ def _build_v1_router(s: Any) -> APIRouter:
         body: DispatchApprovalRequest,
         _auth: DispatchWriteDep,
     ) -> Any:
-        return request_dispatch_approval(recommendation_id, _auth, body.reason)
+        try:
+            return request_dispatch_approval(recommendation_id, _auth, body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @router.post(
         "/dispatch/recommendations/{recommendation_id}/approve",
@@ -659,7 +665,10 @@ def _build_v1_router(s: Any) -> APIRouter:
         body: DispatchApprovalRequest,
         _auth: DispatchApproveDep,
     ) -> Any:
-        return review_dispatch_approval(recommendation_id, _auth, True, body.reason)
+        try:
+            return review_dispatch_approval(recommendation_id, _auth, True, body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @router.post(
         "/dispatch/recommendations/{recommendation_id}/reject",
@@ -672,27 +681,36 @@ def _build_v1_router(s: Any) -> APIRouter:
         body: DispatchApprovalRequest,
         _auth: DispatchApproveDep,
     ) -> Any:
-        return review_dispatch_approval(recommendation_id, _auth, False, body.reason)
+        try:
+            return review_dispatch_approval(recommendation_id, _auth, False, body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @router.post("/edge/receipts", response_model=EdgeReceiptResponse, status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(rl)
     async def _edge_receipt(request: Request, body: EdgeReceiptRequest, _auth: DeviceWriteDep) -> Any:
-        return record_edge_receipt(
-            _auth.tenant_id or "t-001",
-            body.task_id,
-            body.station_id,
-            body.device_id,
-            body.status,
-            body.payload,
-        )
+        try:
+            return record_edge_receipt(
+                _auth.tenant_id or "t-001",
+                body.task_id,
+                body.station_id,
+                body.device_id,
+                body.status,
+                body.payload,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @router.post("/optimization/runs", response_model=OptimizationRunResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
     async def _optimization_run(request: Request, body: OptimizationRunRequest, _auth: DispatchWriteDep) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
-        result = solve_dispatch_optimization(
-            repo, _tenant_scope(_auth), body.station_id, body.horizon_hours, body.objective
-        )
+        try:
+            result = solve_dispatch_optimization(
+                repo, _tenant_scope(_auth), body.station_id, body.horizon_hours, body.objective
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         run_id = persist_optimization_run(
             _auth.tenant_id or "t-001",
             body.station_id or "portfolio",
@@ -709,9 +727,12 @@ def _build_v1_router(s: Any) -> APIRouter:
     @router.post("/vpp/settlements", response_model=VppSettlementResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
     async def _vpp_settlement(request: Request, body: VppSettlementRequest, _auth: VppSettleDep) -> Any:
-        return settle_vpp_event(
-            body.event_id, body.baseline_kw, body.delivered_kw, body.settled_by or _auth.subject, body.evidence
-        )
+        try:
+            return settle_vpp_event(
+                body.event_id, body.baseline_kw, body.delivered_kw, body.settled_by or _auth.subject, body.evidence
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     return router
 
