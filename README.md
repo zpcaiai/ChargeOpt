@@ -81,6 +81,7 @@ CHARGEOPT_SKIP_DB_MIGRATION=1 python scripts/migrate.py
 Migrations are idempotent SQL files in `migrations/`:
 - `001_init.sql` – schema + tables + indexes
 - `002_seed.sql` – reference data + sample records
+- `003_control_plane.sql` – telemetry ingest ledger, dispatch status workflow, persisted ROI simulations, and production seed telemetry
 
 ## Test
 
@@ -127,16 +128,17 @@ All `/api/v1/*` endpoints accept optional `X-API-Key` header when `API_KEY` is s
 2. **test** – pytest with coverage upload to Codecov + artifact
 3. **build** – Docker image build + push to GHCR (`ghcr.io/<owner>/chargeopt`)
 4. **scan** – Trivy vulnerability scan; results uploaded to GitHub Security tab (SARIF)
-5. **deploy-vercel** – `vercel deploy --prod` on `main` (requires `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` secrets)
+5. **deploy-vercel** – pull Vercel production env, build, run `python scripts/migrate.py`, then `vercel deploy --prebuilt --prod`
 
-Required GitHub secrets: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.  
+Required GitHub secrets: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`. `DATABASE_URL` is pulled from Vercel production environment during the deploy job and is not stored in the repository.
 GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 
 ## Deploy To Vercel With Neon
 
 - `api/index.py` re-exports the FastAPI `app` for Vercel's ASGI runtime.
-- `vercel.json` runs `python scripts/migrate.py` during the build step.
-- Set `DATABASE_URL` in Vercel's environment variable panel (Production / Preview / Development).
+- GitHub Actions runs `python scripts/migrate.py` before production deployment so Neon tables are created/updated automatically on `main` pushes.
+- Set `DATABASE_URL` in Vercel's Production environment variables; the CI deploy job pulls it with `vercel pull`.
+- Set `API_KEY` in production before enabling write APIs. Without it, production write endpoints return `503` and read endpoints remain available.
 
 Production URL: **https://chargeopt-os.vercel.app**
 
