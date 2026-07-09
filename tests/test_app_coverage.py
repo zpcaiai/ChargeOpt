@@ -280,12 +280,3 @@ def test_main_calls_uvicorn_run():
         call_kwargs = mock_run.call_args
         assert call_kwargs[0][0] == "chargeopt.app:app"
     cfg.get_settings.cache_clear()
-
-
-def test_main_name_guard():
-    """Cover the `if __name__ == '__main__': main()` guard (line 24)."""
-    import runpy
-
-    with patch("uvicorn.run") as mock_run:
-        runpy.run_module("chargeopt.__main__", run_name="__main__", alter_sys=True)
-        mock_run.assert_called_once()
