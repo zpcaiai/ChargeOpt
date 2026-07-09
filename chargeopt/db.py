@@ -44,7 +44,6 @@ def init_pool() -> None:
         open=True,
         kwargs={
             "connect_timeout": settings.db_connect_timeout,
-            "options": "-c search_path=chargeopt,public",
         },
     )
     logger.info("PostgreSQL connection pool ready (min=%d, max=%d)", settings.db_pool_min, settings.db_pool_max)
@@ -69,7 +68,6 @@ def get_connection() -> Generator:
         with psycopg.connect(
             settings.database_url,
             connect_timeout=settings.db_connect_timeout,
-            options="-c search_path=chargeopt,public",
         ) as conn:
             yield conn
         return
