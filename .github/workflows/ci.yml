@@ -53,14 +53,7 @@ jobs:
         run: |
           set -o pipefail
           python --version
-          python - <<'PY'
-          import importlib.metadata as md
-          for name in ["fastapi", "starlette", "httpx", "pydantic", "pytest", "pytest-cov", "pytest-asyncio", "coverage"]:
-              try:
-                  print(f"{name}={md.version(name)}")
-              except md.PackageNotFoundError:
-                  print(f"{name}=missing")
-          PY
+          python -c 'import importlib.metadata as md; names=["fastapi","starlette","httpx","pydantic","pytest","pytest-cov","pytest-asyncio","coverage"]; [print(f"{name}={md.version(name)}") for name in names]'
           pytest --cov=chargeopt --cov-report=xml --cov-report=term-missing 2>&1 | tee pytest.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
@@ -69,12 +62,7 @@ jobs:
               echo
               tail -n 120 pytest.log
             } > pytest-tail.log
-            msg=$(python - <<'PY'
-          from pathlib import Path
-          text = Path("pytest-tail.log").read_text(errors="replace")[-3500:]
-          print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
-          PY
-          )
+            msg=$(python -c 'from pathlib import Path; text=Path("pytest-tail.log").read_text(errors="replace")[-3500:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))')
             echo "::error title=pytest failed::$msg"
             exit "$status"
           fi
