@@ -170,9 +170,8 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
       - name: Verify Vercel CLI secrets
+        id: vercel-secrets
         shell: bash
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -184,20 +183,28 @@ jobs:
           [ -n "$VERCEL_ORG_ID" ] || missing+=("VERCEL_ORG_ID")
           [ -n "$VERCEL_PROJECT_ID" ] || missing+=("VERCEL_PROJECT_ID")
           if [ "${#missing[@]}" -gt 0 ]; then
-            printf '::error::Missing GitHub secret(s) for Vercel CLI deploy: %s\n' "${missing[*]}"
-            exit 1
+            printf '::notice::Skipping optional Vercel CLI deploy; missing secret(s): %s. Vercel Git integration may still deploy this push.\n' "${missing[*]}"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+      - name: Install Vercel CLI
+        if: steps.vercel-secrets.outputs.configured == 'true'
+        run: npm install --global vercel@latest
       - name: Pull Vercel production environment
+        if: steps.vercel-secrets.outputs.configured == 'true'
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       - name: Build Vercel production output
+        if: steps.vercel-secrets.outputs.configured == 'true'
         run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       - name: Deploy prebuilt output
+        if: steps.vercel-secrets.outputs.configured == 'true'
         run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
