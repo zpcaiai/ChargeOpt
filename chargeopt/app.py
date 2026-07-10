@@ -39,14 +39,18 @@ from .protocols import normalize_protocol_message
 from .repository import (
     acknowledge_alert,
     authenticate_user,
+    claim_next_task,
+    complete_task,
     enqueue_task,
     ingest_telemetry,
     load_repository_from_db,
     persist_dispatch_recommendations,
     persist_optimization_run,
     persist_protocol_message,
+    persist_revenue_proof,
     persist_roi_simulation,
     principal_from_session,
+    reap_expired_tasks,
     record_edge_receipt,
     request_dispatch_approval,
     review_dispatch_approval,
@@ -77,13 +81,21 @@ from .schemas import (
     ProblemDetail,
     ProtocolMessageRequest,
     ProtocolMessageResponse,
+    ReadinessResponse,
     RevenueDiagnosticResponse,
+    RevenueProofRunRequest,
+    RevenueProofRunResponse,
     RoiResponse,
     RoiSimulationPersistedResponse,
     RoiSimulationRequest,
     StationDetailResponse,
     StationListResponse,
+    TaskClaimRequest,
+    TaskClaimResponse,
+    TaskCompleteRequest,
     TaskCreateRequest,
+    TaskReapRequest,
+    TaskReapResponse,
     TaskResponse,
     TelemetryIngestRequest,
     TelemetryIngestResponse,
@@ -379,6 +391,40 @@ def _register_ops_routes(app: FastAPI, s: Any) -> None:
         _update_gauges()
         return {"status": "ok", "version": s.app_version, **db_status}
 
+    @app.get("/ready", tags=["ops"], response_model=ReadinessResponse, include_in_schema=False)
+    async def _ready():
+        checks = {
+            "database_configured": s.use_db or not s.is_production,
+            "database_reachable": True,
+            "debug_disabled": not s.debug,
+            "cors_credentials_safe": not (s.cors_allow_credentials and "*" in s.cors_origins_list),
+        }
+        failures: list[str] = []
+        if s.use_db:
+            try:
+                db_status = health_check()
+                checks["database_reachable"] = db_status.get("db") == "ok"
+            except Exception:
+                checks["database_reachable"] = False
+        if s.is_production and not s.use_db:
+            failures.append("DATABASE_URL is required in production.")
+        if not checks["database_reachable"]:
+            failures.append("Database health check failed.")
+        if s.debug:
+            failures.append("DEBUG must be false outside local development.")
+        if not checks["cors_credentials_safe"]:
+            failures.append("CORS cannot allow credentials with wildcard origins.")
+        ready = all(checks.values())
+        payload = {
+            "status": "ready" if ready else "not_ready",
+            "version": s.app_version,
+            "checks": checks,
+            "failures": failures,
+        }
+        if not ready:
+            return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
+        return payload
+
     @app.get("/metrics", tags=["ops"], include_in_schema=False)
     async def _metrics():
         if not s.metrics_enabled:
@@ -477,6 +523,32 @@ def _build_v1_router(s: Any) -> APIRouter:
             return build_revenue_diagnostics(repo, station_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @router.post(
+        "/revenue-diagnostics/runs",
+        response_model=RevenueProofRunResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _persist_revenue_diagnostic_run(
+        request: Request,
+        body: RevenueProofRunRequest,
+        _auth: DispatchWriteDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        try:
+            diagnostics = build_revenue_diagnostics(repo, body.station_id)
+            proof_id = persist_revenue_proof(
+                _tenant_scope(_auth),
+                body.station_id,
+                diagnostics,
+                body.created_by or _auth.subject,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        return {"id": proof_id, **diagnostics}
 
     @router.get("/audit", response_model=AuditResponse)
     @limiter.limit(rl)
@@ -651,6 +723,53 @@ def _build_v1_router(s: Any) -> APIRouter:
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @router.post("/tasks/claim", response_model=TaskClaimResponse)
+    @limiter.limit(rl)
+    async def _claim_task(request: Request, body: TaskClaimRequest, _auth: TaskWriteDep) -> Any:
+        try:
+            task = claim_next_task(
+                _auth.tenant_id or "*",
+                body.worker_id,
+                body.task_types,
+                body.lease_seconds,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        return {"task": task}
+
+    @router.post("/tasks/reap-expired", response_model=TaskReapResponse)
+    @limiter.limit(rl)
+    async def _reap_tasks(request: Request, body: TaskReapRequest, _auth: TaskWriteDep) -> Any:
+        try:
+            return reap_expired_tasks(_auth.tenant_id or "t-001", body.actor or _auth.subject)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.post("/tasks/{task_id}/complete", response_model=TaskResponse)
+    @limiter.limit(rl)
+    async def _complete_task(
+        request: Request,
+        task_id: str,
+        body: TaskCompleteRequest,
+        _auth: TaskWriteDep,
+    ) -> Any:
+        try:
+            return complete_task(
+                task_id,
+                _auth.tenant_id or "*",
+                body.worker_id,
+                body.status,
+                body.result,
+                body.error,
+                body.retry_delay_seconds,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
     @router.post(
         "/dispatch/recommendations/{recommendation_id}/approval",

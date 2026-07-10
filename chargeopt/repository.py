@@ -303,6 +303,15 @@ def _tenant_for_vpp_event(conn, event_id: str) -> str:
     return str(row[0])
 
 
+def _tenant_for_proof(conn, tenant_id: str | None, station_id: str | None) -> str:
+    if station_id is not None:
+        return _tenant_for_station(conn, station_id)
+    if tenant_id is not None:
+        return tenant_id
+    row = conn.execute("SELECT id FROM chargeopt.tenants ORDER BY id LIMIT 1").fetchone()
+    return str(row[0]) if row is not None else "t-001"
+
+
 # ---------------------------------------------------------------------------
 # Write-path operations
 # ---------------------------------------------------------------------------
@@ -722,6 +731,7 @@ def enqueue_task(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = now()
             RETURNING id, tenant_id, station_id, device_id, task_type, status, priority, payload, result
+                      , attempts, max_attempts, lease_expires_at, locked_by, last_error
             """,
             (task_id, tenant_id, station_id, device_id, task_type, priority, idempotency_key, Json(payload)),
         ).fetchone()
@@ -736,7 +746,7 @@ def enqueue_task(
 
 
 def _task_row_to_dict(row) -> dict[str, object]:
-    return {
+    task = {
         "id": row[0],
         "tenant_id": row[1],
         "station_id": row[2],
@@ -747,6 +757,251 @@ def _task_row_to_dict(row) -> dict[str, object]:
         "payload": row[7] or {},
         "result": row[8] or {},
     }
+    if len(row) > 9:
+        task.update(
+            {
+                "attempts": int(row[9]),
+                "max_attempts": int(row[10]),
+                "lease_expires_at": row[11],
+                "locked_by": row[12],
+                "last_error": row[13],
+            }
+        )
+    return task
+
+
+def claim_next_task(
+    tenant_id: str,
+    worker_id: str,
+    task_types: list[str] | None = None,
+    lease_seconds: int = 300,
+) -> dict[str, object] | None:
+    """Atomically claim the next due task for an async worker."""
+    filters = [
+        "scheduled_at <= now()",
+        "(status = 'queued' OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()))",
+        "attempts < max_attempts",
+    ]
+    params: list[object] = []
+    if tenant_id != "*":
+        filters.insert(0, "tenant_id = %s")
+        params.append(tenant_id)
+    if task_types:
+        filters.append("task_type = ANY(%s)")
+        params.append(task_types)
+    params.extend([lease_seconds, worker_id])
+    query = f"""
+        WITH candidate AS (
+            SELECT id
+            FROM chargeopt.task_queue
+            WHERE {" AND ".join(filters)}
+            ORDER BY priority ASC, scheduled_at ASC, created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE chargeopt.task_queue tq
+        SET status = 'running',
+            attempts = tq.attempts + 1,
+            locked_at = now(),
+            lease_expires_at = now() + (%s * interval '1 second'),
+            locked_by = %s,
+            last_error = NULL,
+            updated_at = now()
+        FROM candidate
+        WHERE tq.id = candidate.id
+        RETURNING tq.id, tq.tenant_id, tq.station_id, tq.device_id, tq.task_type, tq.status,
+                  tq.priority, tq.payload, tq.result, tq.attempts, tq.max_attempts,
+                  tq.lease_expires_at, tq.locked_by, tq.last_error
+    """
+    with get_connection() as conn, conn.transaction():
+        _set_tenant_context(conn, None if tenant_id == "*" else tenant_id)
+        row = conn.execute(query, tuple(params)).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'task.claimed', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", row[1], worker_id, row[0], f"lease_seconds={lease_seconds}"),
+        )
+    return _task_row_to_dict(row)
+
+
+def complete_task(
+    task_id: str,
+    tenant_id: str,
+    worker_id: str,
+    status: str,
+    result: dict,
+    error: str | None = None,
+    retry_delay_seconds: int = 60,
+) -> dict[str, object]:
+    """Complete or retry a worker task with bounded retry semantics."""
+    from psycopg.types.json import Json
+
+    with get_connection() as conn, conn.transaction():
+        row = conn.execute(
+            """
+            SELECT tenant_id, attempts, max_attempts, status, locked_by
+            FROM chargeopt.task_queue
+            WHERE id = %s
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown task_id: {task_id}")
+        task_tenant = str(row[0])
+        if tenant_id != "*" and tenant_id != task_tenant:
+            raise PermissionError("Task belongs to another tenant.")
+        _set_tenant_context(conn, task_tenant)
+        locked_by = row[4]
+        if locked_by is not None and locked_by != worker_id:
+            raise PermissionError("Task lease is owned by another worker.")
+
+        if status == "succeeded":
+            next_status = "completed"
+        elif status == "cancelled":
+            next_status = "cancelled"
+        elif int(row[1]) < int(row[2]):
+            next_status = "queued"
+        else:
+            next_status = "failed"
+
+        task = conn.execute(
+            """
+            UPDATE chargeopt.task_queue
+            SET status = %s,
+                result = %s,
+                last_error = %s,
+                locked_at = NULL,
+                lease_expires_at = NULL,
+                locked_by = NULL,
+                scheduled_at = CASE WHEN %s = 'queued' THEN now() + (%s * interval '1 second') ELSE scheduled_at END,
+                completed_at = CASE WHEN %s IN ('completed', 'failed', 'cancelled') THEN now() ELSE completed_at END,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id, tenant_id, station_id, device_id, task_type, status, priority, payload,
+                      result, attempts, max_attempts, lease_expires_at, locked_by, last_error
+            """,
+            (
+                next_status,
+                Json(result),
+                error,
+                next_status,
+                retry_delay_seconds,
+                next_status,
+                task_id,
+            ),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'task.completed', %s, %s)
+            """,
+            (f"au-{uuid4().hex}", task_tenant, worker_id, task_id, f"{status}->{next_status}"),
+        )
+    invalidate_repository_cache()
+    return _task_row_to_dict(task)
+
+
+def reap_expired_tasks(tenant_id: str, actor: str) -> dict[str, int]:
+    """Requeue or fail tasks whose worker leases expired."""
+    tenant_filter = ""
+    params: tuple[object, ...] = ()
+    if tenant_id != "*":
+        tenant_filter = "AND tenant_id = %s"
+        params = (tenant_id,)
+    with get_connection() as conn, conn.transaction():
+        _set_tenant_context(conn, None if tenant_id == "*" else tenant_id)
+        rows = conn.execute(
+            f"""
+            UPDATE chargeopt.task_queue
+            SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                last_error = COALESCE(last_error, 'worker lease expired'),
+                locked_at = NULL,
+                lease_expires_at = NULL,
+                locked_by = NULL,
+                completed_at = CASE WHEN attempts >= max_attempts THEN now() ELSE completed_at END,
+                updated_at = now()
+            WHERE true
+              {tenant_filter}
+              AND status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < now()
+            RETURNING tenant_id, status
+            """,
+            params,
+        ).fetchall()
+        requeued = sum(1 for row in rows if row[1] == "queued")
+        failed = sum(1 for row in rows if row[1] == "failed")
+        if rows:
+            audit_tenant = tenant_id if tenant_id != "*" else rows[0][0]
+            conn.execute(
+                """
+                INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+                VALUES (%s, %s, now(), %s, 'task.reaped', 'task_queue', %s)
+                """,
+                (f"au-{uuid4().hex}", audit_tenant, actor, f"requeued={requeued}; failed={failed}"),
+            )
+    invalidate_repository_cache()
+    return {"requeued": requeued, "failed": failed, "total": len(rows)}
+
+
+def persist_revenue_proof(
+    tenant_id: str | None,
+    station_id: str | None,
+    diagnostics: dict,
+    created_by: str,
+) -> str:
+    """Persist a revenue-proof snapshot for monthly ROI auditability."""
+    from psycopg.types.json import Json
+
+    proof_id = f"rpf-{uuid4().hex}"
+    portfolio = diagnostics["portfolio"]
+    interval = portfolio["confidence_interval"]
+    scope = diagnostics["scope"]
+    algorithm = diagnostics["algorithm"]
+    with get_connection() as conn, conn.transaction():
+        proof_tenant = _tenant_for_proof(conn, tenant_id, station_id)
+        _set_tenant_context(conn, proof_tenant)
+        conn.execute(
+            """
+            INSERT INTO chargeopt.revenue_proof_runs (
+                id, tenant_id, station_id, generated_at, algorithm,
+                monthly_net_impact, p90_low, p90_high, evidence_window_hours,
+                payload, created_by
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                proof_id,
+                proof_tenant,
+                station_id,
+                diagnostics["generated_at"],
+                algorithm["name"],
+                portfolio["monthly_net_impact"],
+                interval["p90_low"],
+                interval["p90_high"],
+                scope["evidence_window_hours"],
+                Json(diagnostics),
+                created_by,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'revenue_proof.persisted', %s, %s)
+            """,
+            (
+                f"au-{uuid4().hex}",
+                proof_tenant,
+                created_by,
+                proof_id,
+                f"monthly_net_impact={portfolio['monthly_net_impact']}",
+            ),
+        )
+    return proof_id
 
 
 def request_dispatch_approval(recommendation_id: str, principal: Principal, reason: str | None) -> dict[str, object]:

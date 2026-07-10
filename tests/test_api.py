@@ -15,6 +15,15 @@ async def test_health_returns_ok(client):
 
 
 @pytest.mark.asyncio
+async def test_readiness_returns_ready_in_development(client):
+    resp = await client.get("/ready")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    assert body["checks"]["database_configured"] is True
+
+
+@pytest.mark.asyncio
 async def test_overview_endpoint(client):
     resp = await client.get("/api/overview")
     assert resp.status_code == 200
@@ -116,6 +125,23 @@ async def test_revenue_diagnostics_station_filter(client):
     body = resp.json()
     assert body["scope"]["station_count"] == 1
     assert body["stations"][0]["station_id"] == "st-hq-hongqiao"
+
+
+@pytest.mark.asyncio
+async def test_revenue_diagnostics_run_persists_proof(client):
+    from unittest.mock import patch
+
+    with patch("chargeopt.app.persist_revenue_proof", return_value="rpf-1") as persist:
+        resp = await client.post(
+            "/api/revenue-diagnostics/runs",
+            json={"station_id": "st-hq-hongqiao", "created_by": "ops"},
+        )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] == "rpf-1"
+    assert body["portfolio"]["monthly_net_impact"] > 0
+    assert persist.call_args.args[1] == "st-hq-hongqiao"
 
 
 @pytest.mark.asyncio

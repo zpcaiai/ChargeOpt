@@ -184,6 +184,55 @@ async def test_task_approval_receipt_optimization_and_settlement_endpoints(clien
     assert settle.call_args.args[3] == "dev-admin"
 
 
+@pytest.mark.asyncio
+async def test_task_worker_claim_complete_and_reap_endpoints(client):
+    task_payload = {
+        "id": "tsk-1",
+        "tenant_id": "t-001",
+        "station_id": "st-hq-hongqiao",
+        "device_id": None,
+        "task_type": "dispatch.execute",
+        "status": "running",
+        "priority": 10,
+        "payload": {"kw": 100},
+        "result": {},
+        "attempts": 1,
+        "max_attempts": 3,
+        "lease_expires_at": "2026-07-10T08:00:00Z",
+        "locked_by": "worker-1",
+        "last_error": None,
+    }
+    with patch("chargeopt.app.claim_next_task", return_value=task_payload) as claim:
+        claimed = await client.post(
+            "/api/tasks/claim",
+            json={"worker_id": "worker-1", "task_types": ["dispatch.execute"], "lease_seconds": 120},
+        )
+    assert claimed.status_code == 200
+    assert claimed.json()["task"]["id"] == "tsk-1"
+    assert claim.call_args.args[1] == "worker-1"
+
+    completed_payload = task_payload | {
+        "status": "completed",
+        "result": {"edge_status": "succeeded"},
+        "locked_by": None,
+        "lease_expires_at": None,
+    }
+    with patch("chargeopt.app.complete_task", return_value=completed_payload) as complete:
+        completed = await client.post(
+            "/api/tasks/tsk-1/complete",
+            json={"worker_id": "worker-1", "status": "succeeded", "result": {"edge_status": "succeeded"}},
+        )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+    assert complete.call_args.args[0] == "tsk-1"
+
+    with patch("chargeopt.app.reap_expired_tasks", return_value={"requeued": 2, "failed": 1, "total": 3}) as reap:
+        reaped = await client.post("/api/tasks/reap-expired", json={"actor": "ops"})
+    assert reaped.status_code == 200
+    assert reaped.json()["total"] == 3
+    assert reap.call_args.args[1] == "ops"
+
+
 def test_repository_auth_session_and_settlement_math():
     from chargeopt.repository import authenticate_user, settle_vpp_event
 
@@ -221,3 +270,81 @@ def test_repository_auth_session_and_settlement_math():
     with patch("chargeopt.repository.get_connection", return_value=ctx2):
         settlement = settle_vpp_event("vpp-1", 1000, 950, "ops", {"source": "meter"})
     assert settlement["net_revenue"] > 0
+
+
+def test_repository_task_worker_lifecycle_and_revenue_proof_persistence():
+    from chargeopt.repository import claim_next_task, complete_task, persist_revenue_proof, reap_expired_tasks
+
+    task_row = (
+        "tsk-1",
+        "t-001",
+        "st-hq-hongqiao",
+        None,
+        "dispatch.execute",
+        "running",
+        10,
+        {"kw": 100},
+        {},
+        1,
+        3,
+        None,
+        "worker-1",
+        None,
+    )
+    conn = MagicMock()
+    conn.transaction.return_value.__enter__ = lambda s: s
+    conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    claim_cursor = MagicMock()
+    claim_cursor.fetchone.return_value = task_row
+    conn.execute.side_effect = [MagicMock(), claim_cursor, MagicMock()]
+    ctx = MagicMock()
+    ctx.__enter__ = lambda s: conn
+    ctx.__exit__ = MagicMock(return_value=False)
+    with patch("chargeopt.repository.get_connection", return_value=ctx):
+        claimed = claim_next_task("t-001", "worker-1", ["dispatch.execute"], 120)
+    assert claimed["id"] == "tsk-1"
+    assert claimed["attempts"] == 1
+
+    complete_select = MagicMock()
+    complete_select.fetchone.return_value = ("t-001", 1, 3, "running", "worker-1")
+    complete_update = MagicMock()
+    complete_update.fetchone.return_value = task_row[:5] + ("completed",) + task_row[6:14]
+    conn2 = MagicMock()
+    conn2.transaction.return_value.__enter__ = lambda s: s
+    conn2.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    conn2.execute.side_effect = [complete_select, MagicMock(), complete_update, MagicMock()]
+    ctx2 = MagicMock()
+    ctx2.__enter__ = lambda s: conn2
+    ctx2.__exit__ = MagicMock(return_value=False)
+    with patch("chargeopt.repository.get_connection", return_value=ctx2):
+        completed = complete_task("tsk-1", "t-001", "worker-1", "succeeded", {"ok": True})
+    assert completed["status"] == "completed"
+
+    proof = {
+        "generated_at": "2026-07-10T08:00:00",
+        "scope": {"evidence_window_hours": 24},
+        "algorithm": {"name": "counterfactual-profit-proof-v1"},
+        "portfolio": {"monthly_net_impact": 1000, "confidence_interval": {"p90_low": 800, "p90_high": 1200}},
+    }
+    conn3 = MagicMock()
+    conn3.transaction.return_value.__enter__ = lambda s: s
+    conn3.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    ctx3 = MagicMock()
+    ctx3.__enter__ = lambda s: conn3
+    ctx3.__exit__ = MagicMock(return_value=False)
+    with patch("chargeopt.repository.get_connection", return_value=ctx3):
+        proof_id = persist_revenue_proof("t-001", None, proof, "ops")
+    assert proof_id.startswith("rpf-")
+
+    reap_cursor = MagicMock()
+    reap_cursor.fetchall.return_value = [("t-001", "queued"), ("t-001", "failed")]
+    conn4 = MagicMock()
+    conn4.transaction.return_value.__enter__ = lambda s: s
+    conn4.transaction.return_value.__exit__ = MagicMock(return_value=False)
+    conn4.execute.side_effect = [MagicMock(), reap_cursor, MagicMock()]
+    ctx4 = MagicMock()
+    ctx4.__enter__ = lambda s: conn4
+    ctx4.__exit__ = MagicMock(return_value=False)
+    with patch("chargeopt.repository.get_connection", return_value=ctx4):
+        reaped = reap_expired_tasks("t-001", "ops")
+    assert reaped == {"requeued": 1, "failed": 1, "total": 2}

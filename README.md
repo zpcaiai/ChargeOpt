@@ -16,8 +16,9 @@ ChargeOpt OS is a production-grade Enterprise platform for ultra-fast charging, 
 - Auditable dispatch recommendation records
 - Login sessions, RBAC permissions, tenant-scoped repository reads, and Postgres RLS policy foundations
 - OCPP / Modbus / MQTT gateway message normalization and protocol message ledger
-- Async task queue, dispatch approval workflow, edge command receipts, and VPP settlement ledger
+- Async task queue with worker leases/retries, dispatch approval workflow, edge command receipts, and VPP settlement ledger
 - Risk-constrained rolling MPC/MILP dynamic-programming optimizer with persisted optimization run evidence
+- Persisted revenue-proof snapshots for monthly ROI audit and customer business reviews
 - **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key/Bearer auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
 
 ## Quick Start (in-memory, no DB)
@@ -88,6 +89,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `002_seed.sql` – reference data + sample records
 - `003_control_plane.sql` – telemetry ingest ledger, dispatch status workflow, persisted ROI simulations, and production seed telemetry
 - `004_industrial_control_plane.sql` – users/sessions/RBAC, tenant RLS policies, protocol devices/messages, task queue, dispatch approvals, edge receipts, optimization runs, and VPP settlements
+- `005_operational_closure.sql` – task worker leases/retries/timeout diagnostics and persisted revenue-proof evidence snapshots
 
 ## Test
 
@@ -112,6 +114,7 @@ All analytics routes are versioned under `/api/v1/`. Legacy `/api/*` aliases are
 
 ```text
 GET /health
+GET /ready
 GET /metrics                          (Prometheus text format)
 
 GET /api/v1/overview
@@ -126,7 +129,11 @@ GET /api/v1/audit?limit=50&offset=0
 POST /api/v1/auth/login
 GET  /api/v1/auth/me
 POST /api/v1/protocols/{ocpp|modbus|mqtt}/messages
+POST /api/v1/revenue-diagnostics/runs
 POST /api/v1/tasks
+POST /api/v1/tasks/claim
+POST /api/v1/tasks/{task_id}/complete
+POST /api/v1/tasks/reap-expired
 POST /api/v1/dispatch/recommendations/{id}/approval
 POST /api/v1/dispatch/recommendations/{id}/approve
 POST /api/v1/dispatch/recommendations/{id}/reject
@@ -177,7 +184,20 @@ The moat metric is not "the algorithm exists"; it is whether ChargeOpt can repea
 - Produces a moat scorecard covering operating data hours, device adapters, ROI case count, and monthly profit proof.
 - Supports station filtering for a single-site sales review or monthly customer business review.
 
+`POST /api/v1/revenue-diagnostics/runs` persists the same proof payload to PostgreSQL as an auditable evidence snapshot. This is the monthly customer-business-review artifact that turns the product claim into a ledgered ROI case.
+
 The optimizer used by `/api/v1/optimization/runs` is `risk-constrained-mpc-milp-dp-v2`: a serverless-safe rolling-horizon dynamic program over discrete charge/discharge actions. It enforces SOC, transformer, ramp, VPP reserve, degradation, and service-pressure constraints without requiring a heavy commercial solver in Vercel.
+
+## Execution Closure
+
+Approved dispatch recommendations create `task_queue` work items. Field or gateway workers should:
+
+1. Claim work with `POST /api/v1/tasks/claim` using a stable `worker_id`.
+2. Execute the command through the site gateway or EMS adapter.
+3. Complete or retry the task through `POST /api/v1/tasks/{task_id}/complete`.
+4. Continue sending equipment-level receipts through `POST /api/v1/edge/receipts`.
+
+Expired worker leases can be requeued or failed with `POST /api/v1/tasks/reap-expired`. Each state transition writes audit evidence.
 
 ## Operational Caveats
 

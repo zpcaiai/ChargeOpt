@@ -372,6 +372,15 @@ class RevenueDiagnosticResponse(BaseModel):
     moat: dict[str, Any]
 
 
+class RevenueProofRunRequest(BaseModel):
+    station_id: str | None = Field(default=None, min_length=1)
+    created_by: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class RevenueProofRunResponse(RevenueDiagnosticResponse):
+    id: str
+
+
 # ---------------------------------------------------------------------------
 # Industrial control-plane models
 # ---------------------------------------------------------------------------
@@ -418,6 +427,39 @@ class TaskResponse(BaseModel):
     priority: int
     payload: dict[str, Any]
     result: dict[str, Any]
+    attempts: int = 0
+    max_attempts: int = 3
+    lease_expires_at: datetime | None = None
+    locked_by: str | None = None
+    last_error: str | None = None
+
+
+class TaskClaimRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=120)
+    task_types: list[str] | None = None
+    lease_seconds: int = Field(default=300, ge=30, le=3600)
+
+
+class TaskClaimResponse(BaseModel):
+    task: TaskResponse | None = None
+
+
+class TaskCompleteRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=120)
+    status: Literal["succeeded", "failed", "cancelled"]
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = Field(default=None, max_length=1000)
+    retry_delay_seconds: int = Field(default=60, ge=0, le=3600)
+
+
+class TaskReapRequest(BaseModel):
+    actor: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class TaskReapResponse(BaseModel):
+    requeued: int
+    failed: int
+    total: int
 
 
 class DispatchApprovalRequest(BaseModel):
@@ -489,3 +531,10 @@ class HealthResponse(BaseModel):
     db: str
     pool_available: int | None = None
     pool_size: int | None = None
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    version: str
+    checks: dict[str, bool]
+    failures: list[str] = Field(default_factory=list)
