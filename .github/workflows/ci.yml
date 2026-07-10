@@ -130,10 +130,38 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
+  migrate-neon:
+    name: Neon migrations
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install migration dependencies
+        run: pip install -r api/requirements.txt
+      - name: Verify DATABASE_URL secret
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL GitHub secret is required for automatic Neon migrations."
+            exit 1
+          fi
+      - name: Run Neon migrations
+        run: python scripts/migrate.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
   deploy-vercel:
     name: Deploy to Vercel
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build, migrate-neon]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     environment: production
     steps:
@@ -144,8 +172,21 @@ jobs:
           cache: pip
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
-      - name: Install migration dependencies
-        run: pip install -r api/requirements.txt
+      - name: Verify Vercel CLI secrets
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          missing=()
+          [ -n "$VERCEL_TOKEN" ] || missing+=("VERCEL_TOKEN")
+          [ -n "$VERCEL_ORG_ID" ] || missing+=("VERCEL_ORG_ID")
+          [ -n "$VERCEL_PROJECT_ID" ] || missing+=("VERCEL_PROJECT_ID")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Missing GitHub secret(s) for Vercel CLI deploy: %s\n' "${missing[*]}"
+            exit 1
+          fi
       - name: Pull Vercel production environment
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
         env:
@@ -156,10 +197,6 @@ jobs:
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      - name: Run Neon migrations
-        run: python scripts/migrate.py
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Deploy prebuilt output
         run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
