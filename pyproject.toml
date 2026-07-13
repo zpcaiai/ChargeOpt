@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 chargeopt = "chargeopt.__main__:main"
+chargeopt-worker = "chargeopt.worker:main"
 
 [project.optional-dependencies]
 db = [

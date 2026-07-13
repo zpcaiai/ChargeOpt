@@ -70,7 +70,10 @@ def load_repository_from_db(tenant_id: str | None = None) -> Repository:
 
     try:
         repo = _load_from_postgres(tenant_id)
-    except Exception:
+    except Exception as exc:
+        if settings.is_production:
+            logger.exception("Failed to load repository from PostgreSQL in production.")
+            raise RuntimeError("Database repository load failed in production.") from exc
         logger.exception("Failed to load repository from PostgreSQL – falling back to in-memory fixtures.")
         repo = _filter_repository_by_tenant(load_repository(), tenant_id)
 
@@ -312,6 +315,11 @@ def _tenant_for_proof(conn, tenant_id: str | None, station_id: str | None) -> st
     return str(row[0]) if row is not None else "t-001"
 
 
+def _ensure_tenant_allowed(scope_tenant_id: str | None, resource_tenant_id: str) -> None:
+    if scope_tenant_id is not None and scope_tenant_id != "*" and scope_tenant_id != resource_tenant_id:
+        raise PermissionError("Resource belongs to another tenant.")
+
+
 # ---------------------------------------------------------------------------
 # Write-path operations
 # ---------------------------------------------------------------------------
@@ -336,7 +344,7 @@ def append_audit(actor: str, action: str, target: str, detail: str, tenant_id: s
     return audit_id
 
 
-def ingest_telemetry(payload: dict) -> dict[str, object]:
+def ingest_telemetry(payload: dict, scope_tenant_id: str | None = None) -> dict[str, object]:
     """Upsert a telemetry point with idempotency tracking."""
     station_id = payload["station_id"]
     timestamp = payload["timestamp"]
@@ -346,6 +354,7 @@ def ingest_telemetry(payload: dict) -> dict[str, object]:
 
     with get_connection() as conn, conn.transaction():
         tenant_id = _tenant_for_station(conn, station_id)
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         existing = conn.execute(
             "SELECT 1 FROM chargeopt.telemetry_ingest_log WHERE idempotency_key = %s",
@@ -419,7 +428,7 @@ def ingest_telemetry(payload: dict) -> dict[str, object]:
     }
 
 
-def acknowledge_alert(alert_id: str, actor: str) -> dict[str, object]:
+def acknowledge_alert(alert_id: str, actor: str, scope_tenant_id: str | None = None) -> dict[str, object]:
     """Acknowledge an alert and audit the action."""
     with get_connection() as conn, conn.transaction():
         tenant_row = conn.execute(
@@ -434,6 +443,7 @@ def acknowledge_alert(alert_id: str, actor: str) -> dict[str, object]:
         if tenant_row is None:
             raise KeyError(f"Unknown alert_id: {alert_id}")
         tenant_id = str(tenant_row[0])
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         cursor = conn.execute(
             "UPDATE chargeopt.alerts SET acknowledged = true WHERE id = %s",
@@ -507,7 +517,13 @@ def persist_dispatch_recommendations(recommendations: list[dict], actor: str) ->
     return len(recommendations)
 
 
-def update_dispatch_status(recommendation_id: str, status: str, actor: str, reason: str | None) -> dict[str, str]:
+def update_dispatch_status(
+    recommendation_id: str,
+    status: str,
+    actor: str,
+    reason: str | None,
+    scope_tenant_id: str | None = None,
+) -> dict[str, str]:
     """Approve/reject/execute a persisted dispatch recommendation."""
     allowed = {"pending", "approved", "rejected", "executed", "failed", "rolled_back"}
     if status not in allowed:
@@ -521,6 +537,7 @@ def update_dispatch_status(recommendation_id: str, status: str, actor: str, reas
         if tenant_row is None:
             raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
         tenant_id = str(tenant_row[0])
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         cursor = conn.execute(
             """
@@ -547,12 +564,18 @@ def update_dispatch_status(recommendation_id: str, status: str, actor: str, reas
     return {"id": recommendation_id, "status": status}
 
 
-def persist_roi_simulation(station_id: str | None, roi: dict, inputs: dict) -> int:
+def persist_roi_simulation(
+    station_id: str | None,
+    roi: dict,
+    inputs: dict,
+    scope_tenant_id: str | None = None,
+) -> int:
     """Persist an ROI simulation and return its database ID."""
     from psycopg.types.json import Json
 
     with get_connection() as conn, conn.transaction():
         tenant_id = _tenant_for_station(conn, station_id) if station_id else "t-001"
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         row = conn.execute(
             """
@@ -660,15 +683,17 @@ def persist_protocol_message(
     external_id: str,
     message_type: str,
     payload: dict,
+    scope_tenant_id: str | None = None,
 ) -> dict[str, object]:
     from psycopg.types.json import Json
 
     with get_connection() as conn, conn.transaction():
         tenant_id = _tenant_for_station(conn, station_id)
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         if device_id is None:
             device_row = conn.execute(
-                "SELECT id FROM chargeopt.devices WHERE protocol = %s AND external_id = %s",
+                "SELECT id, tenant_id, station_id FROM chargeopt.devices WHERE protocol = %s AND external_id = %s",
                 (protocol, external_id),
             ).fetchone()
             if device_row is None:
@@ -682,7 +707,28 @@ def persist_protocol_message(
                 )
             else:
                 device_id = str(device_row[0])
+                _ensure_tenant_allowed(scope_tenant_id, str(device_row[1]))
+                if str(device_row[1]) != tenant_id or str(device_row[2]) != station_id:
+                    raise PermissionError("Device belongs to another station or tenant.")
         else:
+            device_row = conn.execute(
+                """
+                SELECT tenant_id, station_id, protocol, external_id
+                FROM chargeopt.devices
+                WHERE id = %s
+                """,
+                (device_id,),
+            ).fetchone()
+            if device_row is None:
+                raise KeyError(f"Unknown device_id: {device_id}")
+            _ensure_tenant_allowed(scope_tenant_id, str(device_row[0]))
+            if (
+                str(device_row[0]) != tenant_id
+                or str(device_row[1]) != station_id
+                or str(device_row[2]) != protocol
+                or str(device_row[3]) != external_id
+            ):
+                raise PermissionError("Device identity does not match station, protocol, or external_id.")
             conn.execute(
                 "UPDATE chargeopt.devices SET status = 'online', last_seen_at = now() WHERE id = %s", (device_id,)
             )
@@ -715,6 +761,7 @@ def enqueue_task(
     payload: dict,
     priority: int = 100,
     idempotency_key: str | None = None,
+    scope_tenant_id: str | None = None,
 ) -> dict[str, object]:
     from psycopg.types.json import Json
 
@@ -722,6 +769,24 @@ def enqueue_task(
     with get_connection() as conn, conn.transaction():
         if station_id is not None:
             tenant_id = _tenant_for_station(conn, station_id)
+        if device_id is not None:
+            device_row = conn.execute(
+                "SELECT tenant_id, station_id FROM chargeopt.devices WHERE id = %s",
+                (device_id,),
+            ).fetchone()
+            if device_row is None:
+                raise KeyError(f"Unknown device_id: {device_id}")
+            device_tenant = str(device_row[0])
+            device_station = str(device_row[1])
+            _ensure_tenant_allowed(scope_tenant_id, device_tenant)
+            if station_id is not None and station_id != device_station:
+                raise PermissionError("Device belongs to another station.")
+            if station_id is None:
+                station_id = device_station
+                tenant_id = device_tenant
+            if tenant_id != device_tenant:
+                raise PermissionError("Device belongs to another tenant.")
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         row = conn.execute(
             """
@@ -953,6 +1018,7 @@ def persist_revenue_proof(
     station_id: str | None,
     diagnostics: dict,
     created_by: str,
+    scope_tenant_id: str | None = None,
 ) -> str:
     """Persist a revenue-proof snapshot for monthly ROI auditability."""
     from psycopg.types.json import Json
@@ -964,6 +1030,7 @@ def persist_revenue_proof(
     algorithm = diagnostics["algorithm"]
     with get_connection() as conn, conn.transaction():
         proof_tenant = _tenant_for_proof(conn, tenant_id, station_id)
+        _ensure_tenant_allowed(scope_tenant_id, proof_tenant)
         _set_tenant_context(conn, proof_tenant)
         conn.execute(
             """
@@ -1014,6 +1081,7 @@ def request_dispatch_approval(recommendation_id: str, principal: Principal, reas
         if row is None:
             raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
         tenant_id = str(row[0])
+        _ensure_tenant_allowed(None if principal.is_platform_admin else principal.tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         approval = conn.execute(
             """
@@ -1052,6 +1120,7 @@ def review_dispatch_approval(
         if row is None:
             raise KeyError(f"Unknown recommendation_id: {recommendation_id}")
         tenant_id, station_id, command_payload = row[0], row[1], row[2] or {}
+        _ensure_tenant_allowed(None if principal.is_platform_admin else principal.tenant_id, str(tenant_id))
         _set_tenant_context(conn, tenant_id)
         status = "approved" if approved else "rejected"
         approval = conn.execute(
@@ -1126,15 +1195,41 @@ def record_edge_receipt(
     device_id: str | None,
     status: str,
     payload: dict,
+    scope_tenant_id: str | None = None,
 ) -> dict[str, str]:
     from psycopg.types.json import Json
 
     receipt_id = f"rcp-{uuid4().hex}"
     with get_connection() as conn, conn.transaction():
-        task_row = conn.execute("SELECT tenant_id FROM chargeopt.task_queue WHERE id = %s", (task_id,)).fetchone()
+        task_row = conn.execute(
+            "SELECT tenant_id, station_id, device_id FROM chargeopt.task_queue WHERE id = %s",
+            (task_id,),
+        ).fetchone()
         if task_row is None:
             raise KeyError(f"Unknown task_id: {task_id}")
         tenant_id = str(task_row[0])
+        task_station_id = str(task_row[1]) if task_row[1] is not None else None
+        task_device_id = str(task_row[2]) if task_row[2] is not None else None
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
+        if station_id is not None and task_station_id is not None and station_id != task_station_id:
+            raise PermissionError("Receipt station_id does not match task station_id.")
+        if device_id is not None and task_device_id is not None and device_id != task_device_id:
+            raise PermissionError("Receipt device_id does not match task device_id.")
+        if station_id is not None:
+            station_tenant = _tenant_for_station(conn, station_id)
+            if station_tenant != tenant_id:
+                raise PermissionError("Receipt station belongs to another tenant.")
+        if device_id is not None:
+            device_row = conn.execute(
+                "SELECT tenant_id, station_id FROM chargeopt.devices WHERE id = %s",
+                (device_id,),
+            ).fetchone()
+            if device_row is None:
+                raise KeyError(f"Unknown device_id: {device_id}")
+            if str(device_row[0]) != tenant_id:
+                raise PermissionError("Receipt device belongs to another tenant.")
+            if station_id is not None and str(device_row[1]) != station_id:
+                raise PermissionError("Receipt device belongs to another station.")
         _set_tenant_context(conn, tenant_id)
         conn.execute(
             """
@@ -1180,11 +1275,13 @@ def persist_optimization_run(
     inputs: dict,
     outputs: dict,
     created_by: str,
+    scope_tenant_id: str | None = None,
 ) -> str:
     from psycopg.types.json import Json
 
     run_id = f"opt-{uuid4().hex}"
     with get_connection() as conn, conn.transaction():
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         conn.execute(
             """
@@ -1223,12 +1320,14 @@ def settle_vpp_event(
     delivered_kw: float,
     settled_by: str,
     evidence: dict,
+    scope_tenant_id: str | None = None,
 ) -> dict[str, object]:
     from psycopg.types.json import Json
 
     settlement_id = f"set-{uuid4().hex}"
     with get_connection() as conn, conn.transaction():
         tenant_id = _tenant_for_vpp_event(conn, event_id)
+        _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         _set_tenant_context(conn, tenant_id)
         event = conn.execute(
             "SELECT duration_minutes, incentive_per_kwh FROM chargeopt.vpp_events WHERE id = %s",

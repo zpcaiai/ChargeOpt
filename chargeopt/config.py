@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     metrics_enabled: bool = True
     request_id_header: str = "X-Request-Id"
 
+    # ── Edge worker ──────────────────────────────────────────────────────────
+    edge_gateway_url: str | None = None
+    edge_gateway_token: str | None = None
+    worker_poll_interval_seconds: float = Field(default=5.0, gt=0)
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

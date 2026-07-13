@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -85,3 +86,11 @@ def test_skips_already_applied(monkeypatch, tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "skip" in out.lower() or "already" in out.lower()
+
+
+def test_force_rls_migration_covers_tenant_write_tables():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "006_force_rls.sql").read_text(encoding="utf-8")
+
+    assert "ALTER TABLE IF EXISTS chargeopt.task_queue FORCE ROW LEVEL SECURITY" in sql
+    assert "ALTER TABLE IF EXISTS chargeopt.edge_command_receipts FORCE ROW LEVEL SECURITY" in sql
+    assert "ALTER TABLE IF EXISTS chargeopt.revenue_proof_runs FORCE ROW LEVEL SECURITY" in sql

@@ -9,13 +9,11 @@ Provides:
 - Graceful startup/shutdown with connection-pool lifecycle
 """
 
-from __future__ import annotations
-
 import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response, Security, status
@@ -326,8 +324,11 @@ def resolve_principal(
     )
 
 
+PrincipalDep = Depends(resolve_principal)
+
+
 def require_permission(permission: str):
-    def _dependency(principal: Annotated[Principal, Depends(resolve_principal)]) -> Principal:
+    def _dependency(principal: Principal = PrincipalDep) -> Principal:
         if not has_permission(principal, permission):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
         return principal
@@ -336,7 +337,7 @@ def require_permission(permission: str):
 
 
 def require_write_permission(permission: str):
-    def _dependency(principal: Annotated[Principal, Depends(resolve_principal)]) -> Principal:
+    def _dependency(principal: Principal = PrincipalDep) -> Principal:
         if not has_permission(principal, permission):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
         return principal
@@ -344,18 +345,22 @@ def require_write_permission(permission: str):
     return _dependency
 
 
-AuthDep = Annotated[Principal, Depends(require_permission("station:read"))]
-DispatchWriteDep = Annotated[Principal, Depends(require_write_permission("dispatch:write"))]
-DispatchApproveDep = Annotated[Principal, Depends(require_write_permission("dispatch:approve"))]
-TelemetryWriteDep = Annotated[Principal, Depends(require_write_permission("telemetry:write"))]
-DeviceWriteDep = Annotated[Principal, Depends(require_write_permission("device:write"))]
-TaskWriteDep = Annotated[Principal, Depends(require_write_permission("task:write"))]
-VppSettleDep = Annotated[Principal, Depends(require_write_permission("vpp:settle"))]
-AuditReadDep = Annotated[Principal, Depends(require_permission("audit:read"))]
+AuthDep = Depends(require_permission("station:read"))
+DispatchWriteDep = Depends(require_write_permission("dispatch:write"))
+DispatchApproveDep = Depends(require_write_permission("dispatch:approve"))
+TelemetryWriteDep = Depends(require_write_permission("telemetry:write"))
+DeviceWriteDep = Depends(require_write_permission("device:write"))
+TaskWriteDep = Depends(require_write_permission("task:write"))
+VppSettleDep = Depends(require_write_permission("vpp:settle"))
+AuditReadDep = Depends(require_permission("audit:read"))
 
 
 def _tenant_scope(principal: Principal) -> str | None:
     return None if principal.is_platform_admin else principal.tenant_id
+
+
+def _worker_tenant_scope(principal: Principal) -> str:
+    return "*" if principal.is_platform_admin else principal.tenant_id or "t-001"
 
 
 # ---------------------------------------------------------------------------
@@ -462,24 +467,24 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.get("/auth/me", response_model=PrincipalOut)
     @limiter.limit(rl)
-    async def _me(request: Request, principal: Annotated[Principal, Depends(resolve_principal)]) -> Any:
+    async def _me(request: Request, principal: Principal = PrincipalDep) -> Any:
         return _principal_out(principal)
 
     @router.get("/overview", response_model=OverviewResponse)
     @limiter.limit(rl)
-    async def _overview(request: Request, _auth: AuthDep) -> Any:
+    async def _overview(request: Request, _auth: Principal = AuthDep) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         return build_overview(repo)
 
     @router.get("/stations", response_model=StationListResponse)
     @limiter.limit(rl)
-    async def _stations(request: Request, _auth: AuthDep) -> Any:
+    async def _stations(request: Request, _auth: Principal = AuthDep) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         return {"stations": [station_summary(repo, station) for station in repo.stations]}
 
     @router.get("/stations/{station_id}", response_model=StationDetailResponse)
     @limiter.limit(rl)
-    async def _station_detail(request: Request, station_id: str, _auth: AuthDep) -> Any:
+    async def _station_detail(request: Request, station_id: str, _auth: Principal = AuthDep) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         try:
             return station_detail(repo, station_id)
@@ -488,13 +493,13 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.get("/dispatch", response_model=DispatchResponse)
     @limiter.limit(rl)
-    async def _dispatch(request: Request, _auth: AuthDep) -> Any:
+    async def _dispatch(request: Request, _auth: Principal = AuthDep) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         return build_dispatch(repo)
 
     @router.get("/vpp", response_model=VppResponse)
     @limiter.limit(rl)
-    async def _vpp(request: Request, _auth: AuthDep) -> Any:
+    async def _vpp(request: Request, _auth: Principal = AuthDep) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         return build_vpp(repo)
 
@@ -502,7 +507,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     @limiter.limit(rl)
     async def _roi(
         request: Request,
-        _auth: AuthDep,
+        _auth: Principal = AuthDep,
         capacity_kwh: float = Query(default=1200.0, gt=0),
         power_kw: float = Query(default=600.0, gt=0),
         capex_per_kwh: float = Query(default=1150.0, gt=0),
@@ -515,7 +520,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     @limiter.limit(rl)
     async def _revenue_diagnostics(
         request: Request,
-        _auth: AuthDep,
+        _auth: Principal = AuthDep,
         station_id: str | None = Query(default=None),
     ) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
@@ -533,7 +538,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     async def _persist_revenue_diagnostic_run(
         request: Request,
         body: RevenueProofRunRequest,
-        _auth: DispatchWriteDep,
+        _auth: Principal = DispatchWriteDep,
     ) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         try:
@@ -543,9 +548,12 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.station_id,
                 diagnostics,
                 body.created_by or _auth.subject,
+                scope_tenant_id=_tenant_scope(_auth),
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {"id": proof_id, **diagnostics}
@@ -554,7 +562,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     @limiter.limit(rl)
     async def _audit(
         request: Request,
-        _auth: AuditReadDep,
+        _auth: Principal = AuditReadDep,
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> Any:
@@ -568,13 +576,17 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.post("/telemetry", response_model=TelemetryIngestResponse, status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(rl)
-    async def _ingest_telemetry(request: Request, body: TelemetryIngestRequest, _auth: TelemetryWriteDep) -> Any:
+    async def _ingest_telemetry(
+        request: Request, body: TelemetryIngestRequest, _auth: Principal = TelemetryWriteDep
+    ) -> Any:
         try:
             payload = body.model_dump()
             payload["actor"] = _auth.subject
-            return ingest_telemetry(payload)
+            return ingest_telemetry(payload, _tenant_scope(_auth))
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -587,12 +599,14 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         alert_id: str,
         body: AlertAcknowledgeRequest,
-        _auth: DispatchWriteDep,
+        _auth: Principal = DispatchWriteDep,
     ) -> Any:
         try:
-            return acknowledge_alert(alert_id, body.actor or _auth.subject)
+            return acknowledge_alert(alert_id, body.actor or _auth.subject, _tenant_scope(_auth))
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -605,7 +619,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     async def _generate_dispatch_recommendations(
         request: Request,
         body: DispatchGenerateRequest,
-        _auth: DispatchWriteDep,
+        _auth: Principal = DispatchWriteDep,
     ) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         dispatch = build_dispatch(repo)
@@ -625,12 +639,20 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         recommendation_id: str,
         body: DispatchStatusRequest,
-        _auth: DispatchWriteDep,
+        _auth: Principal = DispatchWriteDep,
     ) -> Any:
         try:
-            return update_dispatch_status(recommendation_id, body.status, body.actor or _auth.subject, body.reason)
+            return update_dispatch_status(
+                recommendation_id,
+                body.status,
+                body.actor or _auth.subject,
+                body.reason,
+                _tenant_scope(_auth),
+            )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -642,11 +664,15 @@ def _build_v1_router(s: Any) -> APIRouter:
         status_code=status.HTTP_201_CREATED,
     )
     @limiter.limit(rl)
-    async def _persist_roi_simulation(request: Request, body: RoiSimulationRequest, _auth: DispatchWriteDep) -> Any:
+    async def _persist_roi_simulation(
+        request: Request, body: RoiSimulationRequest, _auth: Principal = DispatchWriteDep
+    ) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         roi = simulate_roi(repo, body.capacity_kwh, body.power_kw, body.capex_per_kwh, body.vpp)
         try:
-            simulation_id = persist_roi_simulation(body.station_id, roi, body.model_dump())
+            simulation_id = persist_roi_simulation(body.station_id, roi, body.model_dump(), _tenant_scope(_auth))
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {"id": simulation_id, **roi}
@@ -661,7 +687,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         protocol: str,
         body: ProtocolMessageRequest,
-        _auth: DeviceWriteDep,
+        _auth: Principal = DeviceWriteDep,
     ) -> Any:
         normalized = normalize_protocol_message(protocol, body.message_type, body.payload)
         try:
@@ -673,7 +699,10 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.external_id,
                 body.message_type,
                 body.payload | {"normalized": normalized},
+                scope_tenant_id=_tenant_scope(_auth),
             )
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         telemetry_ingested = False
@@ -696,7 +725,14 @@ def _build_v1_router(s: Any) -> APIRouter:
                 or f"{protocol}:{body.external_id}:{body.message_type}:{normalized.get('timestamp')}",
                 "actor": _auth.subject,
             }
-            ingest_telemetry(payload)
+            try:
+                ingest_telemetry(payload, _tenant_scope(_auth))
+            except KeyError as exc:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
             telemetry_ingested = True
         return {
             "id": message["id"],
@@ -710,7 +746,7 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
-    async def _create_task(request: Request, body: TaskCreateRequest, _auth: TaskWriteDep) -> Any:
+    async def _create_task(request: Request, body: TaskCreateRequest, _auth: Principal = TaskWriteDep) -> Any:
         try:
             return enqueue_task(
                 _auth.tenant_id or "t-001",
@@ -720,16 +756,19 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.payload,
                 body.priority,
                 body.idempotency_key,
+                scope_tenant_id=_tenant_scope(_auth),
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     @router.post("/tasks/claim", response_model=TaskClaimResponse)
     @limiter.limit(rl)
-    async def _claim_task(request: Request, body: TaskClaimRequest, _auth: TaskWriteDep) -> Any:
+    async def _claim_task(request: Request, body: TaskClaimRequest, _auth: Principal = TaskWriteDep) -> Any:
         try:
             task = claim_next_task(
-                _auth.tenant_id or "*",
+                _worker_tenant_scope(_auth),
                 body.worker_id,
                 body.task_types,
                 body.lease_seconds,
@@ -740,9 +779,9 @@ def _build_v1_router(s: Any) -> APIRouter:
 
     @router.post("/tasks/reap-expired", response_model=TaskReapResponse)
     @limiter.limit(rl)
-    async def _reap_tasks(request: Request, body: TaskReapRequest, _auth: TaskWriteDep) -> Any:
+    async def _reap_tasks(request: Request, body: TaskReapRequest, _auth: Principal = TaskWriteDep) -> Any:
         try:
-            return reap_expired_tasks(_auth.tenant_id or "t-001", body.actor or _auth.subject)
+            return reap_expired_tasks(_worker_tenant_scope(_auth), body.actor or _auth.subject)
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -752,12 +791,12 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         task_id: str,
         body: TaskCompleteRequest,
-        _auth: TaskWriteDep,
+        _auth: Principal = TaskWriteDep,
     ) -> Any:
         try:
             return complete_task(
                 task_id,
-                _auth.tenant_id or "*",
+                _worker_tenant_scope(_auth),
                 body.worker_id,
                 body.status,
                 body.result,
@@ -781,12 +820,14 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         recommendation_id: str,
         body: DispatchApprovalRequest,
-        _auth: DispatchWriteDep,
+        _auth: Principal = DispatchWriteDep,
     ) -> Any:
         try:
             return request_dispatch_approval(recommendation_id, _auth, body.reason)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     @router.post(
         "/dispatch/recommendations/{recommendation_id}/approve",
@@ -797,12 +838,14 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         recommendation_id: str,
         body: DispatchApprovalRequest,
-        _auth: DispatchApproveDep,
+        _auth: Principal = DispatchApproveDep,
     ) -> Any:
         try:
             return review_dispatch_approval(recommendation_id, _auth, True, body.reason)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     @router.post(
         "/dispatch/recommendations/{recommendation_id}/reject",
@@ -813,16 +856,18 @@ def _build_v1_router(s: Any) -> APIRouter:
         request: Request,
         recommendation_id: str,
         body: DispatchApprovalRequest,
-        _auth: DispatchApproveDep,
+        _auth: Principal = DispatchApproveDep,
     ) -> Any:
         try:
             return review_dispatch_approval(recommendation_id, _auth, False, body.reason)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     @router.post("/edge/receipts", response_model=EdgeReceiptResponse, status_code=status.HTTP_202_ACCEPTED)
     @limiter.limit(rl)
-    async def _edge_receipt(request: Request, body: EdgeReceiptRequest, _auth: DeviceWriteDep) -> Any:
+    async def _edge_receipt(request: Request, body: EdgeReceiptRequest, _auth: Principal = DeviceWriteDep) -> Any:
         try:
             return record_edge_receipt(
                 _auth.tenant_id or "t-001",
@@ -831,13 +876,18 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.device_id,
                 body.status,
                 body.payload,
+                scope_tenant_id=_tenant_scope(_auth),
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     @router.post("/optimization/runs", response_model=OptimizationRunResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
-    async def _optimization_run(request: Request, body: OptimizationRunRequest, _auth: DispatchWriteDep) -> Any:
+    async def _optimization_run(
+        request: Request, body: OptimizationRunRequest, _auth: Principal = DispatchWriteDep
+    ) -> Any:
         repo = load_repository_from_db(_tenant_scope(_auth))
         try:
             result = solve_dispatch_optimization(
@@ -845,8 +895,16 @@ def _build_v1_router(s: Any) -> APIRouter:
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        persist_tenant_id = _auth.tenant_id or "t-001"
+        if body.station_id is not None:
+            station = next((item for item in repo.stations if item.id == body.station_id), None)
+            if station is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}"
+                )
+            persist_tenant_id = station.tenant_id
         run_id = persist_optimization_run(
-            _auth.tenant_id or "t-001",
+            persist_tenant_id,
             body.station_id or "portfolio",
             body.objective,
             body.horizon_hours,
@@ -855,18 +913,26 @@ def _build_v1_router(s: Any) -> APIRouter:
             result["inputs"],
             {"dispatch_plan": result["dispatch_plan"], "constraints": result["constraints"]},
             _auth.subject,
+            scope_tenant_id=_tenant_scope(_auth),
         )
         return {"id": run_id, **result}
 
     @router.post("/vpp/settlements", response_model=VppSettlementResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
-    async def _vpp_settlement(request: Request, body: VppSettlementRequest, _auth: VppSettleDep) -> Any:
+    async def _vpp_settlement(request: Request, body: VppSettlementRequest, _auth: Principal = VppSettleDep) -> Any:
         try:
             return settle_vpp_event(
-                body.event_id, body.baseline_kw, body.delivered_kw, body.settled_by or _auth.subject, body.evidence
+                body.event_id,
+                body.baseline_kw,
+                body.delivered_kw,
+                body.settled_by or _auth.subject,
+                body.evidence,
+                scope_tenant_id=_tenant_scope(_auth),
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     return router
 

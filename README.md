@@ -73,6 +73,9 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per-IP request cap |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warning` \| `error` |
 | `METRICS_ENABLED` | `true` | Expose `/metrics` (Prometheus) |
+| `EDGE_GATEWAY_URL` | _(blank)_ | Edge gateway execution endpoint used by `chargeopt-worker` |
+| `EDGE_GATEWAY_TOKEN` | _(blank)_ | Optional bearer token for the edge gateway |
+| `WORKER_POLL_INTERVAL_SECONDS` | `5` | Poll interval for the long-running worker |
 
 ## Database Migrations
 
@@ -90,6 +93,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `003_control_plane.sql` – telemetry ingest ledger, dispatch status workflow, persisted ROI simulations, and production seed telemetry
 - `004_industrial_control_plane.sql` – users/sessions/RBAC, tenant RLS policies, protocol devices/messages, task queue, dispatch approvals, edge receipts, optimization runs, and VPP settlements
 - `005_operational_closure.sql` – task worker leases/retries/timeout diagnostics and persisted revenue-proof evidence snapshots
+- `006_force_rls.sql` – FORCE ROW LEVEL SECURITY on tenant-scoped operational tables, including task, receipt, optimization, settlement, and proof ledgers
 
 ## Test
 
@@ -191,12 +195,28 @@ The optimizer used by `/api/v1/optimization/runs` is `risk-constrained-mpc-milp-
 
 ## Execution Closure
 
-Approved dispatch recommendations create `task_queue` work items. Field or gateway workers should:
+Approved dispatch recommendations create `task_queue` work items. Run the worker next to the site gateway:
+
+```bash
+EDGE_GATEWAY_URL=https://edge-gateway.example.com/chargeopt/tasks/execute \
+EDGE_GATEWAY_TOKEN=replace-me \
+chargeopt-worker --worker-id site-hq-edge-1 --task-type dispatch.execute
+```
+
+For one-shot validation without touching field equipment:
+
+```bash
+chargeopt-worker --once --dry-run --worker-id smoke-worker --task-type dispatch.execute
+```
+
+The worker claims due work, posts the command payload to the authenticated edge gateway, and records an edge receipt when the gateway returns `succeeded`, `failed`, `rolled_back`, `accepted`, or `running`. If the gateway is unreachable or `EDGE_GATEWAY_URL` is missing outside dry-run mode, the task is completed through the retry path with the error captured in `last_error`.
+
+Low-level APIs remain available for custom workers:
 
 1. Claim work with `POST /api/v1/tasks/claim` using a stable `worker_id`.
 2. Execute the command through the site gateway or EMS adapter.
-3. Complete or retry the task through `POST /api/v1/tasks/{task_id}/complete`.
-4. Continue sending equipment-level receipts through `POST /api/v1/edge/receipts`.
+3. Complete unreachable/retryable failures through `POST /api/v1/tasks/{task_id}/complete`.
+4. Send equipment-level receipts through `POST /api/v1/edge/receipts`.
 
 Expired worker leases can be requeued or failed with `POST /api/v1/tasks/reap-expired`. Each state transition writes audit evidence.
 

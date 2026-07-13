@@ -42,6 +42,7 @@ def test_returns_in_memory_when_no_db(monkeypatch):
 def test_fallback_on_db_error(monkeypatch):
     """If PostgreSQL raises, we still get in-memory data."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://fake:fake@localhost/fake")
+    monkeypatch.setenv("ENVIRONMENT", "development")
     from chargeopt.config import get_settings
 
     get_settings.cache_clear()
@@ -52,6 +53,23 @@ def test_fallback_on_db_error(monkeypatch):
 
     assert isinstance(repo, Repository)
     assert len(repo.stations) > 0
+    get_settings.cache_clear()
+
+
+def test_fails_closed_on_db_error_in_production(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake:fake@localhost/fake")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    from chargeopt.config import get_settings
+
+    get_settings.cache_clear()
+    from chargeopt.repository import load_repository_from_db
+
+    with (
+        patch("chargeopt.repository._load_from_postgres", side_effect=RuntimeError("connection refused")),
+        pytest.raises(RuntimeError, match="Database repository load failed in production"),
+    ):
+        load_repository_from_db()
+
     get_settings.cache_clear()
 
 

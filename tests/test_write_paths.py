@@ -216,6 +216,38 @@ def test_repository_ingest_telemetry_writes_and_audits():
     assert conn.execute.call_count >= 4
 
 
+def test_repository_ingest_telemetry_rejects_cross_tenant_station():
+    from chargeopt.repository import ingest_telemetry
+
+    conn = _transaction_conn()
+    tenant_cursor = MagicMock()
+    tenant_cursor.fetchone.return_value = ("t-2",)
+    conn.execute.return_value = tenant_cursor
+
+    with (
+        patch("chargeopt.repository.get_connection", return_value=_connection_context(conn)),
+        pytest.raises(PermissionError, match="another tenant"),
+    ):
+        ingest_telemetry(
+            {
+                "station_id": "st-2",
+                "timestamp": datetime(2026, 7, 9, 12, tzinfo=UTC),
+                "load_kw": 1.0,
+                "pv_kw": 0.0,
+                "grid_kw": 1.0,
+                "storage_power_kw": 0.0,
+                "storage_soc": 0.5,
+                "connector_occupied": 1,
+                "queue_length": 0,
+                "sessions": 1,
+                "energy_kwh": 1.0,
+                "revenue": 1.0,
+                "alert_count": 0,
+            },
+            scope_tenant_id="t-1",
+        )
+
+
 def test_repository_acknowledge_unknown_alert_raises():
     from chargeopt.repository import acknowledge_alert
 
@@ -264,3 +296,52 @@ def test_repository_persist_roi_returns_id():
         simulation_id = persist_roi_simulation("st-1", roi, {"capacity_kwh": 1200})
 
     assert simulation_id == 42
+
+
+def test_repository_protocol_message_rejects_device_identity_mismatch():
+    from chargeopt.repository import persist_protocol_message
+
+    conn = _transaction_conn()
+    station_cursor = MagicMock()
+    station_cursor.fetchone.return_value = ("t-1",)
+    device_cursor = MagicMock()
+    device_cursor.fetchone.return_value = ("t-2", "st-2", "ocpp", "cp-1")
+    conn.execute.side_effect = [station_cursor, MagicMock(), device_cursor]
+
+    with (
+        patch("chargeopt.repository.get_connection", return_value=_connection_context(conn)),
+        pytest.raises(PermissionError, match="another tenant"),
+    ):
+        persist_protocol_message(
+            "t-1",
+            "ocpp",
+            "st-1",
+            "dev-2",
+            "cp-1",
+            "MeterValues",
+            {"meterValue": []},
+            scope_tenant_id="t-1",
+        )
+
+
+def test_repository_edge_receipt_rejects_cross_tenant_task():
+    from chargeopt.repository import record_edge_receipt
+
+    conn = _transaction_conn()
+    task_cursor = MagicMock()
+    task_cursor.fetchone.return_value = ("t-2", "st-2", None)
+    conn.execute.return_value = task_cursor
+
+    with (
+        patch("chargeopt.repository.get_connection", return_value=_connection_context(conn)),
+        pytest.raises(PermissionError, match="another tenant"),
+    ):
+        record_edge_receipt(
+            "t-1",
+            "tsk-2",
+            "st-2",
+            None,
+            "succeeded",
+            {},
+            scope_tenant_id="t-1",
+        )
