@@ -1,0 +1,35 @@
+name: VPP automation cycle
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: vpp-production-cycle
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    name: Trigger production autopilot
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 3
+    steps:
+      - name: Verify scheduler secret
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET is required for unattended VPP cycles."
+            exit 1
+          fi
+      - name: Run idempotent VPP cycle
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 15 --max-time 120 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            https://chargeopt-os.vercel.app/api/cron/vpp-cycle

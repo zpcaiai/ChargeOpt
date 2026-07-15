@@ -27,7 +27,7 @@ The production control plane closes the loop from station economics through mark
    Signed interval evidence records baseline, actual grid power, delivery, quality flags, source, and evidence hashes. Settlement batches calculate committed/delivered energy, performance, gross revenue, imbalance cost, penalties, net revenue, and a deterministic evidence root for finance review and disputes.
 
 7. Autopilot operations
-   Vercel Cron triggers an idempotent five-minute control cycle. Active risk policy, fresh telemetry, a closed circuit breaker, approved limits, and configured market credentials are mandatory. Duplicate cycles are rejected by a tenant/cycle unique key; three market failures open the breaker.
+   GitHub Actions triggers an idempotent five-minute control cycle through a secret-protected Vercel endpoint. Active risk policy, fresh telemetry, a closed circuit breaker, approved limits, and configured market credentials are mandatory. Duplicate cycles are rejected by a tenant/cycle unique key; three market failures open the breaker. The scheduler can be replaced by a dedicated production scheduler without changing the cycle contract.
 
 8. Revenue proof
    Charging revenue, energy purchase cost, demand charge exposure, storage arbitrage, demand charge savings, VPP revenue, battery degradation, payback, NPV, IRR, and monthly counterfactual profit lift. This layer answers the commercial question: "same site, with ChargeOpt vs. without ChargeOpt, how much more did the operator earn or avoid losing this month?" Proof runs can be persisted as tenant-scoped evidence snapshots for monthly business reviews.

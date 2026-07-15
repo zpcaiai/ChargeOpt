@@ -16,7 +16,7 @@ ChargeOpt OS is a production-grade control plane for ultra-fast charging, PV-sto
 - Calibrated P10/P50/P90 flexibility forecasts and risk-constrained portfolio bid blocks
 - Idempotent signed market submission, immutable hash-chained order events, fills, cancellation states, and delivery schedules
 - Automated trade-to-site dispatch, interval meter evidence, imbalance settlement, and finance evidence roots
-- Five-minute Vercel Cron autopilot with policy gates, duplicate-cycle protection, circuit breaking, and failure compensation
+- Five-minute GitHub Actions autopilot with policy gates, duplicate-cycle protection, circuit breaking, and failure compensation
 - Auditable dispatch recommendation records
 - Login sessions, RBAC permissions, tenant-scoped repository reads, and Postgres RLS policy foundations
 - OCPP / Modbus / MQTT gateway message normalization and protocol message ledger
@@ -80,7 +80,7 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 | `EDGE_GATEWAY_URL` | _(blank)_ | Edge gateway execution endpoint used by `chargeopt-worker` |
 | `EDGE_GATEWAY_TOKEN` | _(blank)_ | Optional bearer token for the edge gateway |
 | `WORKER_POLL_INTERVAL_SECONDS` | `5` | Poll interval for the long-running worker |
-| `CRON_SECRET` | _(blank)_ | Bearer secret used by Vercel Cron; required for unattended cycles |
+| `CRON_SECRET` | _(blank)_ | Shared bearer secret used by the production scheduler; required for unattended cycles |
 | `MARKET_WEBHOOK_SECRET` | _(blank)_ | HMAC secret for signed trade-fill callbacks |
 | `VPP_AUTOMATION_ENABLED` | `false` | Enables scheduled portfolio forecasting and bidding |
 | `VPP_MAX_ORDERS_PER_CYCLE` | `8` | Hard cap on new orders created per tenant and cycle |
@@ -190,7 +190,7 @@ GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 - GitHub Actions runs `python scripts/migrate.py` before production deployment so Neon tables are created/updated automatically on `main` pushes.
 - Set `DATABASE_URL` in both Vercel Production environment variables and GitHub Actions secrets. Vercel uses it at runtime; GitHub Actions uses it to apply migrations before deployment.
 - Set `API_KEY` in production for machine-to-machine access, or use `/api/v1/auth/login` for human/operator access.
-- Set `CRON_SECRET` and `VPP_AUTOMATION_ENABLED=true` to activate the five-minute production cycle. Vercel Cron sends `Authorization: Bearer $CRON_SECRET` automatically.
+- Set the same `CRON_SECRET` in Vercel Production and the GitHub `production` environment, then set `VPP_AUTOMATION_ENABLED=true`. `.github/workflows/vpp-cycle.yml` calls the protected endpoint every five minutes with retry, timeout, and concurrency controls. This remains deployable on Vercel Hobby; a dedicated scheduler can call the same idempotent endpoint for stricter timing SLAs.
 - Keep a connection in `sandbox` mode for certification drills. For live mode, set its `base_url`, `credential_ref`, venue participant ID, and the matching token/signing-secret environment variables.
 - Field equipment must connect through an authenticated gateway that posts OCPP/Modbus/MQTT-normalized payloads to `/api/v1/protocols/{protocol}/messages`; direct charger control remains gated by approval + task queue + edge receipt.
 
