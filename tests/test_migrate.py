@@ -115,3 +115,13 @@ def test_vpp_trading_migration_has_full_tenant_and_audit_controls():
     assert "FORCE ROW LEVEL SECURITY" in sql
     assert "prevent_order_event_mutation" in sql
     assert "idempotency_key text NOT NULL" in sql
+
+
+def test_default_credentials_are_disabled_by_followup_migration():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "008_disable_default_credentials.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SET active = false" in sql
+    assert "password_salt = 'chargeopt-demo-salt-v1'" in sql
+    assert "SET revoked_at = now()" in sql

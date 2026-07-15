@@ -27,9 +27,9 @@ jobs:
       - name: Install ruff
         run: pip install "ruff>=0.4,<1"
       - name: Run ruff check
-        run: ruff check chargeopt/ tests/
+        run: ruff check chargeopt/ tests/ scripts/
       - name: Run ruff format check
-        run: ruff format --check chargeopt/ tests/
+        run: ruff format --check chargeopt/ tests/ scripts/
 
   test:
     name: Test (pytest)

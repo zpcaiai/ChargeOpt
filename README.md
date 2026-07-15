@@ -168,7 +168,7 @@ GET  /api/cron/vpp-cycle
 Error responses conform to **RFC 7807** (`application/problem+json`).  
 Production endpoints require either a valid `Authorization: Bearer <token>` from `/api/v1/auth/login` or a valid `X-API-Key`.
 
-Bootstrap database user after migration `004`: `operator@chargeopt.local` / `ChangeMe!2026`. Rotate or disable this account immediately in a real deployment.
+Migration `008` disables the public bootstrap credential and revokes its sessions. Provision or rotate an administrator interactively with `DATABASE_URL=... python scripts/manage_user.py --email <email> --tenant-id <tenant> --role tenant_admin`; passwords are never accepted as command-line arguments or stored in the repository.
 
 ## CI/CD (GitHub Actions)
 
