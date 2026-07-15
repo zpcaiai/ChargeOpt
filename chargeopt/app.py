@@ -13,7 +13,7 @@ import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -33,6 +33,8 @@ from .auth import ROLE_PERMISSIONS, Principal, development_principal, has_permis
 from .config import get_settings
 from .db import close_pool, health_check, init_pool
 from .logging_config import configure_logging
+from .mlops import evaluate_model, list_models, promote_model, register_model
+from .operations_assurance import live_market_readiness, record_shadow_day, run_assurance_checks
 from .optimizer import solve_dispatch_optimization
 from .protocols import normalize_protocol_message
 from .repository import (
@@ -77,6 +79,10 @@ from .schemas import (
     LoginResponse,
     MarketTradeResponse,
     MarketTradeWebhookRequest,
+    ModelEvaluationRequest,
+    ModelEvaluationResponse,
+    ModelRegisterRequest,
+    ModelResponse,
     OptimizationRunRequest,
     OptimizationRunResponse,
     OverviewResponse,
@@ -91,6 +97,13 @@ from .schemas import (
     RoiResponse,
     RoiSimulationPersistedResponse,
     RoiSimulationRequest,
+    SettlementActionResponse,
+    SettlementApprovalRequest,
+    SettlementDisputeRequest,
+    SettlementDisputeResolutionRequest,
+    SettlementExportRequest,
+    SettlementPaymentRequest,
+    SettlementReversalRequest,
     StationDetailResponse,
     StationListResponse,
     TaskClaimRequest,
@@ -114,10 +127,17 @@ from .schemas import (
     VppTradingDashboardResponse,
 )
 from .vpp_automation import run_all_automation_cycles, run_automation_cycle
+from .vpp_operations import run_operational_maintenance
 from .vpp_repository import (
+    approve_settlement_batch,
     create_settlement_batch,
+    dispute_settlement_batch,
+    export_settlement_batch,
     ingest_meter_interval,
+    mark_settlement_paid,
     record_trade_fill,
+    resolve_settlement_dispute,
+    reverse_settlement_batch,
     set_circuit_breaker,
     trading_dashboard,
 )
@@ -381,6 +401,8 @@ VppSettleDep = Depends(require_write_permission("vpp:settle"))
 VppTradeDep = Depends(require_write_permission("vpp:trade"))
 VppMeterWriteDep = Depends(require_write_permission("vpp:meter:write"))
 VppOperateDep = Depends(require_write_permission("vpp:operate"))
+ModelWriteDep = Depends(require_write_permission("model:write"))
+ModelApproveDep = Depends(require_write_permission("model:approve"))
 AuditReadDep = Depends(require_permission("audit:read"))
 
 
@@ -473,7 +495,26 @@ def _register_ops_routes(app: FastAPI, s: Any) -> None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid cron credentials.")
         if not s.vpp_automation_enabled:
             return {"status": "disabled", "tenant_count": 0, "results": []}
-        return run_all_automation_cycles(trigger_source="vercel-cron")
+        cycles = run_all_automation_cycles(trigger_source="production-scheduler")
+        operations = run_operational_maintenance("production-scheduler")
+        return {
+            "status": "degraded"
+            if cycles["status"] == "degraded" or operations["status"] == "degraded"
+            else "completed",
+            "cycles": cycles,
+            "operations": operations,
+        }
+
+    @app.get("/api/cron/assurance", tags=["ops"], include_in_schema=False)
+    async def _assurance_cron(authorization: str | None = Header(default=None)):
+        if not s.cron_secret or not hmac.compare_digest(authorization or "", f"Bearer {s.cron_secret}"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid cron credentials.")
+        assurance = run_assurance_checks("production-assurance")
+        evidence_date = datetime.now(UTC).date() - timedelta(days=1)
+        evidence = [
+            record_shadow_day(row["tenant_id"], evidence_date, "production-assurance") for row in assurance["tenants"]
+        ]
+        return {"status": assurance["status"], "assurance": assurance, "shadow_evidence": evidence}
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +778,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.message_type,
                 body.payload | {"normalized": normalized},
                 scope_tenant_id=_tenant_scope(_auth),
+                idempotency_key=body.idempotency_key,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
@@ -914,6 +956,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.status,
                 body.payload,
                 scope_tenant_id=_tenant_scope(_auth),
+                idempotency_key=body.idempotency_key,
             )
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -953,6 +996,81 @@ def _build_v1_router(s: Any) -> APIRouter:
             scope_tenant_id=_tenant_scope(_auth),
         )
         return {"id": run_id, **result}
+
+    @router.get("/models", response_model=list[ModelResponse])
+    @limiter.limit(rl)
+    async def _models(
+        request: Request,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = ModelWriteDep,
+    ) -> Any:
+        target_tenant = tenant_id or _auth.tenant_id
+        if target_tenant is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+        try:
+            return list_models(target_tenant, _tenant_scope(_auth))
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    @router.post("/models", response_model=ModelResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit(rl)
+    async def _register_model(request: Request, body: ModelRegisterRequest, _auth: Principal = ModelWriteDep) -> Any:
+        target_tenant = body.tenant_id or _auth.tenant_id
+        if target_tenant is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+        try:
+            return register_model(
+                target_tenant, body.model_dump(exclude={"tenant_id"}), _auth.subject, _tenant_scope(_auth)
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @router.post(
+        "/models/{model_id}/evaluations",
+        response_model=ModelEvaluationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _evaluate_model(
+        request: Request,
+        model_id: str,
+        body: ModelEvaluationRequest,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = ModelWriteDep,
+    ) -> Any:
+        target_tenant = tenant_id or _auth.tenant_id
+        if target_tenant is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+        try:
+            return evaluate_model(model_id, target_tenant, body.model_dump(), _auth.subject, _tenant_scope(_auth))
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @router.post("/models/{model_id}/promote", response_model=ModelResponse)
+    @limiter.limit(rl)
+    async def _promote_model(
+        request: Request,
+        model_id: str,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = ModelApproveDep,
+    ) -> Any:
+        target_tenant = tenant_id or _auth.tenant_id
+        if target_tenant is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+        try:
+            return promote_model(model_id, target_tenant, _auth.subject, _tenant_scope(_auth))
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @router.post("/vpp/settlements", response_model=VppSettlementResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit(rl)
@@ -1014,6 +1132,18 @@ def _build_v1_router(s: Any) -> APIRouter:
             return trading_dashboard(tenant_id)
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.get("/vpp/trading/live-readiness")
+    @limiter.limit(rl)
+    async def _vpp_live_readiness(request: Request, _auth: Principal = AuthDep) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        if not s.use_db:
+            return {"ready": False, "blockers": ["database_required"], "shadow_qualified_days": 0}
+        return live_market_readiness(tenant_id)
 
     @router.post(
         "/vpp/trading/automation/run",
@@ -1169,6 +1299,148 @@ def _build_v1_router(s: Any) -> APIRouter:
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches/{batch_id}/approve",
+        response_model=SettlementActionResponse,
+    )
+    @limiter.limit(rl)
+    async def _approve_vpp_settlement(
+        request: Request,
+        batch_id: str,
+        body: SettlementApprovalRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return approve_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches/{batch_id}/dispute",
+        response_model=SettlementActionResponse,
+    )
+    @limiter.limit(rl)
+    async def _dispute_vpp_settlement(
+        request: Request,
+        batch_id: str,
+        body: SettlementDisputeRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return dispute_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches/{batch_id}/resolve-dispute",
+        response_model=SettlementActionResponse,
+    )
+    @limiter.limit(rl)
+    async def _resolve_vpp_settlement_dispute(
+        request: Request,
+        batch_id: str,
+        body: SettlementDisputeResolutionRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return resolve_settlement_dispute(
+                tenant_id, batch_id, _auth.subject, body.resolution, accepted=body.accepted
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches/{batch_id}/export",
+        response_model=SettlementActionResponse,
+    )
+    @limiter.limit(rl)
+    async def _export_vpp_settlement(
+        request: Request,
+        batch_id: str,
+        body: SettlementExportRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return export_settlement_batch(tenant_id, batch_id, _auth.subject, body.format, body.destination)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches/{batch_id}/paid",
+        response_model=SettlementActionResponse,
+    )
+    @limiter.limit(rl)
+    async def _mark_vpp_settlement_paid(
+        request: Request,
+        batch_id: str,
+        body: SettlementPaymentRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return mark_settlement_paid(tenant_id, batch_id, _auth.subject, body.payment_reference)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches/{batch_id}/reverse",
+        response_model=SettlementActionResponse,
+    )
+    @limiter.limit(rl)
+    async def _reverse_vpp_settlement(
+        request: Request,
+        batch_id: str,
+        body: SettlementReversalRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return reverse_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason, body.external_reference)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @router.post("/vpp/trading/circuit-breaker", response_model=CircuitBreakerResponse)
     @limiter.limit("12/minute")

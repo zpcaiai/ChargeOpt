@@ -60,7 +60,7 @@ def close_pool() -> None:
 
 @contextlib.contextmanager
 def get_connection() -> Generator:
-    """Yield a checked-out connection from the pool."""
+    """Yield a connection under the non-owner application RLS role."""
     settings = get_settings()
     if settings.use_db and settings.is_serverless:
         import psycopg
@@ -69,7 +69,11 @@ def get_connection() -> Generator:
             settings.database_url,
             connect_timeout=settings.db_connect_timeout,
         ) as conn:
-            yield conn
+            conn.execute("SET ROLE chargeopt_app")
+            try:
+                yield conn
+            finally:
+                conn.execute("RESET ROLE")
         return
     if _pool is None:
         # Vercel serverless does not run ASGI lifespan reliably for every cold
@@ -78,7 +82,11 @@ def get_connection() -> Generator:
     if _pool is None:
         raise RuntimeError("Connection pool is not initialised.  Call init_pool() first.")
     with _pool.connection() as conn:
-        yield conn
+        conn.execute("SET ROLE chargeopt_app")
+        try:
+            yield conn
+        finally:
+            conn.execute("RESET ROLE")
 
 
 def health_check() -> dict[str, object]:

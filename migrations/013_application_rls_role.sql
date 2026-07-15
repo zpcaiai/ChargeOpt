@@ -1,0 +1,24 @@
+-- The application must never run queries as the database owner. Neon owner
+-- roles can bypass RLS even when FORCE ROW LEVEL SECURITY is enabled.
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chargeopt_app') THEN
+        CREATE ROLE chargeopt_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    ELSE
+        ALTER ROLE chargeopt_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+END $$;
+
+GRANT chargeopt_app TO CURRENT_USER;
+GRANT USAGE ON SCHEMA chargeopt TO chargeopt_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA chargeopt TO chargeopt_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA chargeopt TO chargeopt_app;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA chargeopt TO chargeopt_app;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA chargeopt
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO chargeopt_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA chargeopt
+    GRANT USAGE, SELECT ON SEQUENCES TO chargeopt_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA chargeopt
+    GRANT EXECUTE ON FUNCTIONS TO chargeopt_app;

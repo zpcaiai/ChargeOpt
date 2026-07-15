@@ -16,11 +16,8 @@ from .vpp_repository import (
     get_trading_context,
     list_automation_tenants,
     persist_forecast,
-    set_circuit_breaker,
-    transition_market_order,
 )
 from .vpp_trading import (
-    build_market_adapter,
     evaluate_order_risk,
     optimize_bid_blocks,
     probabilistic_portfolio_forecast,
@@ -50,7 +47,7 @@ def run_automation_cycle(
 
     forecast_id: str | None = None
     orders_created = 0
-    submitted = 0
+    enqueued = 0
     rejected = 0
     failures: list[str] = []
     try:
@@ -59,14 +56,20 @@ def run_automation_cycle(
         if breaker["state"] != "closed":
             summary = {"reason": "circuit_breaker_not_closed", "breaker": breaker}
             finish_automation_cycle(tenant_id, run_id, "skipped", summary)
-            return {"tenant_id": tenant_id, "cycle_key": cycle_key, "status": "skipped", **summary}
+            return {"tenant_id": tenant_id, "cycle_key": cycle_key, "status": "skipped", "orders_created": 0, **summary}
+        connection = context["connection"]
+        if connection["mode"] == "live" and not (connection.get("live_readiness") or {}).get("ready"):
+            summary = {
+                "reason": "live_market_readiness_gate",
+                "blockers": (connection.get("live_readiness") or {}).get("blockers", ["readiness_unknown"]),
+            }
+            finish_automation_cycle(tenant_id, run_id, "skipped", summary)
+            return {"tenant_id": tenant_id, "cycle_key": cycle_key, "status": "skipped", "orders_created": 0, **summary}
 
         repo = load_repository_from_db(tenant_id)
         forecast = probabilistic_portfolio_forecast(repo, tenant_id, now=now)
         forecast_id = persist_forecast(tenant_id, forecast)
         bids = optimize_bid_blocks(repo, tenant_id, forecast, context["policy"])
-        adapter = build_market_adapter(context["connection"])
-
         for bid in bids[:max_orders_per_cycle]:
             idempotency_seed = "|".join(
                 [tenant_id, context["connection"]["id"], bid["product"], bid["delivery_start"], bid["side"]]
@@ -75,7 +78,7 @@ def run_automation_cycle(
             risk = evaluate_order_risk(
                 bid,
                 context["policy"],
-                open_order_count=context["open_order_count"] + submitted,
+                open_order_count=context["open_order_count"] + enqueued,
                 committed_energy_kwh=context["committed_energy_kwh"],
                 circuit_state=context["circuit_breaker"]["state"],
                 telemetry_age_seconds=forecast["data_freshness_seconds"],
@@ -96,46 +99,12 @@ def run_automation_cycle(
             if order["status"] != "ready":
                 continue
             orders_created += 1
-            transition_market_order(
-                tenant_id, order["id"], "submitting", actor, {"adapter": context["connection"]["adapter"]}
-            )
-            try:
-                result = adapter.submit_order(
-                    {
-                        **bid,
-                        "client_order_id": order["client_order_id"],
-                        "idempotency_key": idempotency_key,
-                        "market_code": context["connection"]["market_code"],
-                        "participant_id": context["connection"]["participant_id"],
-                    }
-                )
-                target = "submitted" if result.accepted else "rejected"
-                transition_market_order(
-                    tenant_id,
-                    order["id"],
-                    target,
-                    actor,
-                    result.raw,
-                    market_order_id=result.market_order_id,
-                    last_error=None if result.accepted else str(result.raw)[:1000],
-                )
-                submitted += int(result.accepted)
-                rejected += int(not result.accepted)
-            except Exception as exc:
-                failures.append(str(exc))
-                transition_market_order(
-                    tenant_id,
-                    order["id"],
-                    "failed",
-                    actor,
-                    {"error": str(exc)},
-                    last_error=str(exc)[:1000],
-                )
+            enqueued += 1
         status = "degraded" if failures else "completed"
         summary = {
             "candidate_bids": len(bids),
             "orders_created": orders_created,
-            "submitted": submitted,
+            "enqueued_for_submission": enqueued,
             "risk_or_market_rejected": rejected,
             "failures": failures[:10],
             "forecast_calibration": forecast["calibration_score"],
@@ -149,8 +118,6 @@ def run_automation_cycle(
             forecast_run_id=forecast_id,
             orders_created=orders_created,
         )
-        if failures and len(failures) >= 3:
-            set_circuit_breaker(tenant_id, "open", "three_or_more_market_failures_in_cycle", actor)
         logger.info("vpp_automation_cycle", tenant_id=tenant_id, cycle_key=cycle_key, status=status, **summary)
         return {"tenant_id": tenant_id, "cycle_key": cycle_key, "status": status, **summary}
     except Exception as exc:

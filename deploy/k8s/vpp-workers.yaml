@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chargeopt-vpp-worker
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: chargeopt-vpp-worker
+  template:
+    metadata:
+      labels:
+        app: chargeopt-vpp-worker
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: chargeopt-vpp-worker
+      containers:
+        - name: worker
+          image: ghcr.io/zpcaiai/chargeopt:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "chargeopt.vpp_operations"]
+          args: ["--poll-interval", "5", "--automation-interval", "300"]
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: VPP_AUTOMATION_ENABLED
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chargeopt-production
+                  key: database-url
+            - name: EDGE_GATEWAY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chargeopt-production
+                  key: edge-gateway-url
+            - name: EDGE_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chargeopt-production
+                  key: edge-gateway-token
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chargeopt-vpp-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: chargeopt-vpp-worker

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from csv import DictWriter
 from datetime import UTC, datetime
+from io import StringIO
 from typing import Any
 from uuid import uuid4
 
@@ -87,9 +89,14 @@ def get_trading_context(tenant_id: str) -> dict[str, Any]:
             "SELECT state, reason, failure_count, reset_after FROM chargeopt.vpp_circuit_breakers WHERE tenant_id = %s AND scope = 'global'",
             (tenant_id,),
         ).fetchone()
+    connection = _columns(connection_cursor, connection_row)
+    if connection["mode"] == "live":
+        from .operations_assurance import live_market_readiness
+
+        connection["live_readiness"] = live_market_readiness(tenant_id)
     return {
         "policy": _columns(policy_cursor, policy_row),
-        "connection": _columns(connection_cursor, connection_row),
+        "connection": connection,
         "open_order_count": int(metrics[0]),
         "committed_energy_kwh": float(metrics[1]),
         "circuit_breaker": {
@@ -273,6 +280,22 @@ def create_market_order(
             _append_order_event(
                 conn, tenant_id, order_id, "risk_decision", "draft", initial_status, actor, risk_decision
             )
+            if initial_status == "ready":
+                conn.execute(
+                    """
+                    INSERT INTO chargeopt.vpp_outbox (
+                        id, tenant_id, event_key, topic, aggregate_type, aggregate_id, payload
+                    ) VALUES (%s,%s,%s,'market.order.submit','market_order',%s,%s)
+                    ON CONFLICT (tenant_id,event_key) DO NOTHING
+                    """,
+                    (
+                        f"obx-{uuid4().hex}",
+                        tenant_id,
+                        f"market.order.submit:{order_id}",
+                        order_id,
+                        _json({"order_id": order_id, "connection_id": connection_id}),
+                    ),
+                )
             _audit(conn, tenant_id, actor, "vpp.order_created", order_id, initial_status)
     return actual
 
@@ -317,6 +340,189 @@ def transition_market_order(
         updated_cursor = conn.execute("SELECT * FROM chargeopt.market_orders WHERE id=%s", (order_id,))
         updated = updated_cursor.fetchone()
     return _columns(updated_cursor, updated)
+
+
+def claim_outbox_messages(worker_id: str, *, limit: int = 20, lease_seconds: int = 120) -> list[dict[str, Any]]:
+    """Lease due outbox messages with SKIP LOCKED for parallel publishers."""
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, "*")
+        cursor = conn.execute(
+            """
+            WITH candidates AS (
+                SELECT id
+                FROM chargeopt.vpp_outbox
+                WHERE (
+                    (status IN ('pending','failed') AND available_at <= now())
+                    OR (status='publishing' AND lease_expires_at < now())
+                )
+                  AND attempts < max_attempts
+                ORDER BY available_at, created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+            )
+            UPDATE chargeopt.vpp_outbox o
+            SET status='publishing', attempts=o.attempts+1, locked_by=%s,
+                lease_expires_at=now()+(%s*interval '1 second'), updated_at=now()
+            FROM candidates
+            WHERE o.id=candidates.id
+            RETURNING o.*
+            """,
+            (limit, worker_id, lease_seconds),
+        )
+        rows = [_columns(cursor, row) for row in cursor.fetchall()]
+    return rows
+
+
+def finish_outbox_message(
+    message_id: str,
+    worker_id: str,
+    *,
+    published: bool,
+    error: str | None = None,
+    retry_delay_seconds: int = 30,
+) -> dict[str, Any]:
+    """Publish, retry, or dead-letter a leased outbox message."""
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, "*")
+        cursor = conn.execute(
+            "SELECT * FROM chargeopt.vpp_outbox WHERE id=%s FOR UPDATE",
+            (message_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Unknown outbox message: {message_id}")
+        current = _columns(cursor, row)
+        if current["locked_by"] != worker_id:
+            raise PermissionError("Outbox lease is owned by another worker.")
+        if published:
+            next_status = "published"
+        elif int(current["attempts"]) >= int(current["max_attempts"]):
+            next_status = "dead_letter"
+        else:
+            next_status = "failed"
+        updated_cursor = conn.execute(
+            """
+            UPDATE chargeopt.vpp_outbox
+            SET status=%s, published_at=CASE WHEN %s THEN now() ELSE published_at END,
+                available_at=CASE WHEN %s='failed' THEN now()+(%s*interval '1 second') ELSE available_at END,
+                last_error=%s, locked_by=NULL, lease_expires_at=NULL, updated_at=now()
+            WHERE id=%s
+            RETURNING *
+            """,
+            (next_status, published, next_status, retry_delay_seconds, error, message_id),
+        )
+        updated = _columns(updated_cursor, updated_cursor.fetchone())
+    return updated
+
+
+def get_order_for_operation(tenant_id: str, order_id: str) -> dict[str, Any]:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        cursor = conn.execute(
+            """
+            SELECT mo.*, mc.adapter connection_adapter, mc.mode connection_mode,
+                   mc.enabled connection_enabled, mc.base_url connection_base_url,
+                   mc.credential_ref connection_credential_ref, mc.participant_id connection_participant_id,
+                   mc.market_certificate_status connection_certificate_status,
+                   mc.market_certificate_expires_at connection_certificate_expires_at,
+                   mc.trading_qualification_status connection_qualification_status,
+                   mc.device_credentials_attested_at connection_device_attested_at
+            FROM chargeopt.market_orders mo
+            JOIN chargeopt.market_connections mc ON mc.id=mo.connection_id
+            WHERE mo.id=%s AND mo.tenant_id=%s
+            """,
+            (order_id, tenant_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Unknown order_id: {order_id}")
+        result = _columns(cursor, row)
+    result["connection"] = {
+        "id": result["connection_id"],
+        "adapter": result.pop("connection_adapter"),
+        "mode": result.pop("connection_mode"),
+        "enabled": result.pop("connection_enabled"),
+        "base_url": result.pop("connection_base_url"),
+        "credential_ref": result.pop("connection_credential_ref"),
+        "participant_id": result.pop("connection_participant_id"),
+        "market_certificate_status": result.pop("connection_certificate_status"),
+        "market_certificate_expires_at": result.pop("connection_certificate_expires_at"),
+        "trading_qualification_status": result.pop("connection_qualification_status"),
+        "device_credentials_attested_at": result.pop("connection_device_attested_at"),
+    }
+    if result["connection"]["mode"] == "live":
+        from .operations_assurance import live_market_readiness
+
+        result["connection"]["live_readiness"] = live_market_readiness(tenant_id)
+    return result
+
+
+def list_orders_for_reconciliation(limit: int = 100) -> list[dict[str, Any]]:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, "*")
+        cursor = conn.execute(
+            """
+            SELECT tenant_id,id FROM chargeopt.market_orders
+            WHERE market_order_id IS NOT NULL
+              AND status IN ('submitting','submitted','partially_filled','cancel_pending')
+              AND (last_reconciled_at IS NULL OR last_reconciled_at < now()-interval '2 minutes')
+            ORDER BY COALESCE(last_reconciled_at,created_at), created_at
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        refs = [(str(row[0]), str(row[1])) for row in cursor.fetchall()]
+    return [get_order_for_operation(tenant_id, order_id) for tenant_id, order_id in refs]
+
+
+def mark_order_reconciled(
+    tenant_id: str,
+    order_id: str,
+    reconciliation_status: str,
+    actor: str,
+    payload: dict[str, Any],
+) -> None:
+    if reconciliation_status not in {"matched", "mismatch", "unknown", "not_applicable"}:
+        raise ValueError("invalid reconciliation status")
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        conn.execute(
+            """
+            UPDATE chargeopt.market_orders
+            SET reconciliation_status=%s,last_reconciled_at=now(),updated_at=now()
+            WHERE id=%s AND tenant_id=%s
+            """,
+            (reconciliation_status, order_id, tenant_id),
+        )
+        _append_order_event(
+            conn,
+            tenant_id,
+            order_id,
+            "reconciliation",
+            None,
+            reconciliation_status,
+            actor,
+            payload,
+        )
+
+
+def record_operational_heartbeat(
+    tenant_id: str,
+    component: str,
+    instance_id: str,
+    status: str,
+    detail: dict[str, Any],
+) -> None:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        conn.execute(
+            """
+            INSERT INTO chargeopt.vpp_operational_heartbeats
+                (tenant_id,component,instance_id,status,detail)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (tenant_id, component, instance_id, status, _json(detail)),
+        )
 
 
 def record_trade_fill(
@@ -399,7 +605,7 @@ def record_trade_fill(
                 "delivery_start": order["delivery_start"].isoformat(),
                 "delivery_end": order["delivery_end"].isoformat(),
                 "target_adjustment_kw": round(target_kw, 3),
-                "target_grid_kw": allocation["target_grid_kw"],
+                "target_grid_kw": round(max(0.0, float(allocation["baseline_kw"]) - target_kw), 3),
                 "safety": {"fail_mode": "hold", "receipt_required": True},
             }
             conn.execute(
@@ -435,7 +641,7 @@ def record_trade_fill(
                     order["delivery_end"],
                     allocation["baseline_kw"],
                     target_kw,
-                    allocation["target_grid_kw"],
+                    max(0.0, float(allocation["baseline_kw"]) - target_kw),
                     task_id,
                 ),
             )
@@ -531,11 +737,14 @@ def create_settlement_batch(
             meter_cursor = conn.execute(
                 """
                 SELECT mi.* FROM chargeopt.vpp_meter_intervals mi
-                JOIN chargeopt.delivery_schedules ds ON ds.station_id=mi.station_id AND ds.trade_id=%s
                 WHERE mi.tenant_id=%s AND mi.interval_start >= %s AND mi.interval_end <= %s
+                  AND EXISTS (
+                      SELECT 1 FROM chargeopt.delivery_schedules ds
+                      WHERE ds.station_id=mi.station_id AND ds.trade_id=%s
+                  )
                 ORDER BY mi.interval_start
                 """,
-                (trade["id"], tenant_id, trade["delivery_start"], trade["delivery_end"]),
+                (tenant_id, trade["delivery_start"], trade["delivery_end"], trade["id"]),
             )
             meters = [_columns(meter_cursor, row) for row in meter_cursor.fetchall()]
             result = calculate_trade_settlement(
@@ -600,6 +809,9 @@ def create_settlement_batch(
                 ),
             )
         _audit(conn, tenant_id, actor, "vpp.settlement_calculated", batch_id, f"net={round(net, 2)}")
+        _append_settlement_event(
+            conn, tenant_id, batch_id, "calculated", None, "review", actor, None, {"net_revenue": round(net, 2)}
+        )
     return {
         "id": batch_id,
         "status": "review",
@@ -609,6 +821,312 @@ def create_settlement_batch(
         "penalties": round(penalties, 2),
         "net_revenue": round(net, 2),
         "evidence_root_hash": root_hash,
+    }
+
+
+SETTLEMENT_TRANSITIONS = {
+    "review": {"approved", "disputed", "failed"},
+    "approved": {"exported", "disputed"},
+    "exported": {"paid", "disputed"},
+    "disputed": {"review", "failed"},
+    "paid": {"reversed"},
+}
+
+
+def _settlement_batch_for_update(conn, tenant_id: str, batch_id: str) -> dict[str, Any]:
+    cursor = conn.execute(
+        """
+        SELECT id,tenant_id,market_code,period_start,period_end,status,gross_revenue,
+               imbalance_cost,penalties,net_revenue,evidence_root_hash,created_by,approved_by,
+               created_at,approved_at,exported_at,paid_at,payment_reference,reversed_at
+        FROM chargeopt.vpp_settlement_batches WHERE id=%s AND tenant_id=%s FOR UPDATE
+        """,
+        (batch_id, tenant_id),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise KeyError(f"Unknown settlement batch: {batch_id}")
+    return _columns(cursor, row)
+
+
+def _append_settlement_event(
+    conn,
+    tenant_id: str,
+    batch_id: str,
+    event_type: str,
+    from_status: str | None,
+    to_status: str,
+    actor: str,
+    reason: str | None,
+    payload: dict[str, Any],
+) -> str:
+    previous = conn.execute(
+        """SELECT sequence_no,event_hash FROM chargeopt.vpp_settlement_events
+           WHERE batch_id=%s ORDER BY sequence_no DESC LIMIT 1 FOR UPDATE""",
+        (batch_id,),
+    ).fetchone()
+    sequence = int(previous[0]) + 1 if previous else 1
+    previous_hash = str(previous[1]) if previous else None
+    material = json.dumps(
+        {
+            "batch_id": batch_id,
+            "sequence_no": sequence,
+            "event_type": event_type,
+            "from_status": from_status,
+            "to_status": to_status,
+            "actor": actor,
+            "reason": reason,
+            "payload": payload,
+            "previous_hash": previous_hash,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    )
+    event_hash = hashlib.sha256(material.encode()).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO chargeopt.vpp_settlement_events (
+            id,tenant_id,batch_id,sequence_no,event_type,from_status,to_status,actor,
+            reason,payload,previous_hash,event_hash
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            f"ste-{uuid4().hex}",
+            tenant_id,
+            batch_id,
+            sequence,
+            event_type,
+            from_status,
+            to_status,
+            actor,
+            reason,
+            _json(payload),
+            previous_hash,
+            event_hash,
+        ),
+    )
+    return event_hash
+
+
+def _assert_settlement_transition(current: str, target: str) -> None:
+    if target not in SETTLEMENT_TRANSITIONS.get(current, set()):
+        raise ValueError(f"invalid settlement transition: {current} -> {target}")
+
+
+def approve_settlement_batch(tenant_id: str, batch_id: str, actor: str, reason: str | None) -> dict[str, Any]:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        batch = _settlement_batch_for_update(conn, tenant_id, batch_id)
+        _assert_settlement_transition(batch["status"], "approved")
+        if batch["created_by"] == actor:
+            raise PermissionError("Settlement creator cannot approve their own batch.")
+        conn.execute(
+            "UPDATE chargeopt.vpp_settlement_batches SET status='approved',approved_by=%s,approved_at=now() WHERE id=%s",
+            (actor, batch_id),
+        )
+        event_hash = _append_settlement_event(
+            conn, tenant_id, batch_id, "approved", batch["status"], "approved", actor, reason, {}
+        )
+        _audit(conn, tenant_id, actor, "vpp.settlement_approved", batch_id, event_hash)
+    return {"id": batch_id, "status": "approved", "event_hash": event_hash}
+
+
+def dispute_settlement_batch(tenant_id: str, batch_id: str, actor: str, reason: str) -> dict[str, Any]:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        batch = _settlement_batch_for_update(conn, tenant_id, batch_id)
+        _assert_settlement_transition(batch["status"], "disputed")
+        dispute_id = f"std-{uuid4().hex}"
+        conn.execute(
+            """INSERT INTO chargeopt.vpp_settlement_disputes
+               (id,tenant_id,batch_id,status,reason,raised_by) VALUES (%s,%s,%s,'open',%s,%s)""",
+            (dispute_id, tenant_id, batch_id, reason, actor),
+        )
+        conn.execute("UPDATE chargeopt.vpp_settlement_batches SET status='disputed' WHERE id=%s", (batch_id,))
+        event_hash = _append_settlement_event(
+            conn,
+            tenant_id,
+            batch_id,
+            "disputed",
+            batch["status"],
+            "disputed",
+            actor,
+            reason,
+            {"dispute_id": dispute_id},
+        )
+    return {"id": batch_id, "status": "disputed", "event_hash": event_hash, "dispute_id": dispute_id}
+
+
+def resolve_settlement_dispute(
+    tenant_id: str, batch_id: str, actor: str, resolution: str, *, accepted: bool
+) -> dict[str, Any]:
+    target = "review" if accepted else "failed"
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        batch = _settlement_batch_for_update(conn, tenant_id, batch_id)
+        _assert_settlement_transition(batch["status"], target)
+        dispute = conn.execute(
+            "SELECT id FROM chargeopt.vpp_settlement_disputes WHERE batch_id=%s AND status='open' FOR UPDATE",
+            (batch_id,),
+        ).fetchone()
+        if dispute is None:
+            raise ValueError("settlement batch has no open dispute")
+        conn.execute(
+            """UPDATE chargeopt.vpp_settlement_disputes
+               SET status=%s,resolution=%s,resolved_by=%s,resolved_at=now() WHERE id=%s""",
+            ("resolved" if accepted else "rejected", resolution, actor, dispute[0]),
+        )
+        conn.execute("UPDATE chargeopt.vpp_settlement_batches SET status=%s WHERE id=%s", (target, batch_id))
+        event_hash = _append_settlement_event(
+            conn,
+            tenant_id,
+            batch_id,
+            "dispute_resolved",
+            "disputed",
+            target,
+            actor,
+            resolution,
+            {"dispute_id": str(dispute[0]), "accepted": accepted},
+        )
+    return {"id": batch_id, "status": target, "event_hash": event_hash, "dispute_id": str(dispute[0])}
+
+
+def export_settlement_batch(
+    tenant_id: str, batch_id: str, actor: str, export_format: str, destination: str
+) -> dict[str, Any]:
+    if export_format not in {"csv", "json"}:
+        raise ValueError("settlement export format must be csv or json")
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        batch = _settlement_batch_for_update(conn, tenant_id, batch_id)
+        _assert_settlement_transition(batch["status"], "exported")
+        cursor = conn.execute(
+            """SELECT trade_id,committed_kwh,delivered_kwh,performance_score,gross_revenue,
+                      imbalance_cost,penalty,net_revenue,evidence
+               FROM chargeopt.vpp_settlement_lines WHERE batch_id=%s ORDER BY trade_id""",
+            (batch_id,),
+        )
+        lines = [_columns(cursor, row) for row in cursor.fetchall()]
+        export_rows = [{key: value for key, value in line.items() if key != "evidence"} for line in lines]
+        if export_format == "json":
+            content = json.dumps(export_rows, separators=(",", ":"), sort_keys=True, default=str)
+        else:
+            output = StringIO()
+            fields = list(export_rows[0]) if export_rows else ["trade_id"]
+            writer = DictWriter(output, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(export_rows)
+            content = output.getvalue()
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        export_id = f"stx-{uuid4().hex}"
+        manifest = {
+            "batch_id": batch_id,
+            "evidence_root_hash": batch["evidence_root_hash"],
+            "content_hash": content_hash,
+            "row_count": len(export_rows),
+        }
+        conn.execute(
+            """INSERT INTO chargeopt.vpp_settlement_exports
+               (id,tenant_id,batch_id,format,destination,content_hash,row_count,manifest,generated_by)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                export_id,
+                tenant_id,
+                batch_id,
+                export_format,
+                destination,
+                content_hash,
+                len(export_rows),
+                _json(manifest),
+                actor,
+            ),
+        )
+        conn.execute(
+            "UPDATE chargeopt.vpp_settlement_batches SET status='exported',exported_at=now() WHERE id=%s", (batch_id,)
+        )
+        event_hash = _append_settlement_event(
+            conn,
+            tenant_id,
+            batch_id,
+            "exported",
+            "approved",
+            "exported",
+            actor,
+            None,
+            manifest | {"destination": destination},
+        )
+    return {
+        "id": batch_id,
+        "status": "exported",
+        "event_hash": event_hash,
+        "export_id": export_id,
+        "format": export_format,
+        "destination": destination,
+        "content_hash": content_hash,
+        "row_count": len(export_rows),
+        "content": content,
+    }
+
+
+def mark_settlement_paid(tenant_id: str, batch_id: str, actor: str, payment_reference: str) -> dict[str, Any]:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        batch = _settlement_batch_for_update(conn, tenant_id, batch_id)
+        _assert_settlement_transition(batch["status"], "paid")
+        conn.execute(
+            "UPDATE chargeopt.vpp_settlement_batches SET status='paid',paid_at=now(),payment_reference=%s WHERE id=%s",
+            (payment_reference, batch_id),
+        )
+        event_hash = _append_settlement_event(
+            conn,
+            tenant_id,
+            batch_id,
+            "paid",
+            "exported",
+            "paid",
+            actor,
+            None,
+            {"payment_reference": payment_reference, "net_revenue": float(batch["net_revenue"])},
+        )
+    return {"id": batch_id, "status": "paid", "event_hash": event_hash, "payment_reference": payment_reference}
+
+
+def reverse_settlement_batch(
+    tenant_id: str, batch_id: str, actor: str, reason: str, external_reference: str | None
+) -> dict[str, Any]:
+    with get_connection() as conn, conn.transaction():
+        _tenant_context(conn, tenant_id)
+        batch = _settlement_batch_for_update(conn, tenant_id, batch_id)
+        _assert_settlement_transition(batch["status"], "reversed")
+        adjustment_id = f"sta-{uuid4().hex}"
+        amount = -float(batch["net_revenue"])
+        conn.execute(
+            """INSERT INTO chargeopt.vpp_settlement_adjustments
+               (id,tenant_id,batch_id,adjustment_type,amount,reason,external_reference,created_by)
+               VALUES (%s,%s,%s,'reversal',%s,%s,%s,%s)""",
+            (adjustment_id, tenant_id, batch_id, amount, reason, external_reference, actor),
+        )
+        conn.execute(
+            "UPDATE chargeopt.vpp_settlement_batches SET status='reversed',reversed_at=now() WHERE id=%s", (batch_id,)
+        )
+        event_hash = _append_settlement_event(
+            conn,
+            tenant_id,
+            batch_id,
+            "reversed",
+            "paid",
+            "reversed",
+            actor,
+            reason,
+            {"adjustment_id": adjustment_id, "amount": amount, "external_reference": external_reference},
+        )
+    return {
+        "id": batch_id,
+        "status": "reversed",
+        "event_hash": event_hash,
+        "adjustment_id": adjustment_id,
+        "amount": amount,
     }
 
 

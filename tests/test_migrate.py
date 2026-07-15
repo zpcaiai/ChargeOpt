@@ -125,3 +125,74 @@ def test_default_credentials_are_disabled_by_followup_migration():
     assert "SET active = false" in sql
     assert "password_salt = 'chargeopt-demo-salt-v1'" in sql
     assert "SET revoked_at = now()" in sql
+
+
+def test_reliable_operations_migration_is_fail_closed():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "009_reliable_vpp_operations.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "event_key text" in sql
+    assert "recovered running task without lease" in sql
+    assert "vpp_operational_heartbeats" in sql
+    assert "NULLIF(current_setting('chargeopt.tenant_id', true), '') IS NOT NULL" in sql
+    assert "COALESCE(current_setting('chargeopt.tenant_id', true), '*')" not in sql
+
+
+def test_mlops_migration_has_registry_quality_evidence_and_rls():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "010_mlops_registry.sql").read_text(encoding="utf-8")
+
+    assert "model_registry" in sql
+    assert "model_evaluations" in sql
+    assert "idx_chargeopt_active_model_scope" in sql
+    assert "FORCE ROW LEVEL SECURITY" in sql
+
+
+def test_settlement_workflow_migration_is_immutable_and_auditable():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "011_settlement_workflow.sql").read_text(
+        encoding="utf-8"
+    )
+
+    for table in (
+        "vpp_settlement_events",
+        "vpp_settlement_disputes",
+        "vpp_settlement_exports",
+        "vpp_settlement_adjustments",
+    ):
+        assert f"chargeopt.{table}" in sql
+    assert "prevent_settlement_ledger_mutation" in sql
+    assert "FORCE ROW LEVEL SECURITY" in sql
+
+
+def test_operational_assurance_migration_requires_real_live_inputs():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "012_operational_assurance.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "market_certificate_status" in sql
+    assert "trading_qualification_status" in sql
+    assert "device_credentials_attested_at" in sql
+    assert "shadow_run_evidence" in sql
+    assert "recovery_drills" in sql
+    assert "prevent_shadow_evidence_mutation" in sql
+
+
+def test_ingress_receipts_have_durable_idempotency_indexes():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "014_ingress_receipt_idempotency.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "protocol_messages" in sql
+    assert "edge_command_receipts" in sql
+    assert "idempotency_key" in sql
+    assert "CREATE UNIQUE INDEX" in sql
+
+
+def test_application_role_cannot_bypass_rls():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "013_application_rls_role.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "NOBYPASSRLS" in sql
+    assert "GRANT chargeopt_app TO CURRENT_USER" in sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES" in sql

@@ -183,8 +183,9 @@ def test_repository_ingest_telemetry_writes_and_audits():
     duplicate_cursor.fetchone.return_value = None
     write_cursor = MagicMock()
     conn.execute.side_effect = [
+        MagicMock(),
         station_cursor,
-        write_cursor,
+        MagicMock(),
         duplicate_cursor,
         write_cursor,
         write_cursor,

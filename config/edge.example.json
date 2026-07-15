@@ -1,0 +1,66 @@
+{
+  "control_plane_url": "https://charge-opt.vercel.app",
+  "control_plane_api_key": "replace-with-tenant-scoped-device-api-key",
+  "gateway_token": "replace-with-at-least-24-random-characters",
+  "gateway_host": "127.0.0.1",
+  "gateway_port": 9100,
+  "device_protocols": {
+    "dev-storage-01": "modbus",
+    "dev-charger-01": "ocpp"
+  },
+  "station_protocols": {
+    "st-example": "modbus"
+  },
+  "mqtt": {
+    "host": "mqtt.example.internal",
+    "port": 8883,
+    "client_id": "chargeopt-edge-st-example",
+    "username": "credential-from-site-secret-store",
+    "password": "credential-from-site-secret-store",
+    "ca_cert": "/etc/chargeopt/tls/site-ca.pem",
+    "client_cert": "/etc/chargeopt/tls/mqtt-client.pem",
+    "client_key": "/etc/chargeopt/tls/mqtt-client-key.pem",
+    "command_topic": "sites/st-example/commands",
+    "subscriptions": [
+      {
+        "topic": "sites/st-example/telemetry/#",
+        "qos": 1,
+        "station_id": "st-example",
+        "device_id": "dev-meter-01",
+        "message_type": "telemetry"
+      }
+    ]
+  },
+  "modbus": {
+    "host": "10.20.0.10",
+    "port": 502,
+    "station_id": "st-example",
+    "device_id": "dev-storage-01",
+    "network_trust_boundary": "site-control-vlan-over-managed-vpn",
+    "poll_interval_seconds": 10,
+    "registers": {
+      "load_kw": {"address": 0, "device_id": 1, "scale": 0.1, "signed": true},
+      "pv_kw": {"address": 1, "device_id": 1, "scale": 0.1, "signed": true},
+      "storage_soc": {"address": 2, "device_id": 1, "scale": 0.001}
+    },
+    "command_register": {
+      "address": 100,
+      "device_id": 1,
+      "scale": 0.1,
+      "min_raw": -5000,
+      "max_raw": 5000
+    }
+  },
+  "ocpp": {
+    "host": "0.0.0.0",
+    "port": 9000,
+    "server_cert": "/etc/chargeopt/tls/ocpp-server.pem",
+    "server_key": "/etc/chargeopt/tls/ocpp-server-key.pem",
+    "client_ca": "/etc/chargeopt/tls/charger-ca.pem",
+    "allowed_charge_points": ["CP-001"],
+    "charge_points": {
+      "CP-001": {"station_id": "st-example", "device_id": "dev-charger-01"}
+    },
+    "device_charge_points": {"dev-charger-01": "CP-001"}
+  }
+}

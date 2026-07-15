@@ -480,6 +480,7 @@ class EdgeReceiptRequest(BaseModel):
     device_id: str | None = None
     status: Literal["accepted", "executing", "succeeded", "failed", "rolled_back"]
     payload: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=240)
 
 
 class EdgeReceiptResponse(BaseModel):
@@ -591,6 +592,49 @@ class VppSettlementBatchResponse(BaseModel):
     evidence_root_hash: str
 
 
+class SettlementApprovalRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class SettlementDisputeRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class SettlementDisputeResolutionRequest(BaseModel):
+    resolution: str = Field(min_length=3, max_length=4000)
+    accepted: bool = True
+
+
+class SettlementExportRequest(BaseModel):
+    format: Literal["csv", "json"] = "csv"
+    destination: str = Field(min_length=3, max_length=500)
+
+
+class SettlementPaymentRequest(BaseModel):
+    payment_reference: str = Field(min_length=3, max_length=240)
+
+
+class SettlementReversalRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+    external_reference: str | None = Field(default=None, max_length=240)
+
+
+class SettlementActionResponse(BaseModel):
+    id: str
+    status: str
+    event_hash: str
+    dispute_id: str | None = None
+    export_id: str | None = None
+    adjustment_id: str | None = None
+    payment_reference: str | None = None
+    format: str | None = None
+    destination: str | None = None
+    content_hash: str | None = None
+    row_count: int | None = None
+    content: str | None = None
+    amount: float | None = None
+
+
 class CircuitBreakerRequest(BaseModel):
     state: Literal["closed", "open", "half_open"]
     reason: str = Field(min_length=3, max_length=1000)
@@ -616,6 +660,60 @@ class VppTradingDashboardResponse(BaseModel):
     orders: list[dict[str, Any]]
     automation_runs: list[dict[str, Any]]
     settlements: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# MLOps lifecycle
+# ---------------------------------------------------------------------------
+
+
+class ModelRegisterRequest(BaseModel):
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=120)
+    scope: str = Field(min_length=2, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    algorithm: str = Field(min_length=2, max_length=160)
+    artifact_uri: str = Field(min_length=8, max_length=1000)
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    training_data_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    training_window_start: datetime
+    training_window_end: datetime
+    metrics: dict[str, float] = Field(default_factory=dict)
+
+
+class ModelEvaluationRequest(BaseModel):
+    dataset_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    actual: list[float] = Field(min_length=8, max_length=100000)
+    p10: list[float] = Field(min_length=8, max_length=100000)
+    p50: list[float] = Field(min_length=8, max_length=100000)
+    p90: list[float] = Field(min_length=8, max_length=100000)
+    reference_metrics: dict[str, float] | None = None
+
+
+class ModelResponse(BaseModel):
+    id: str
+    tenant_id: str
+    scope: str
+    version: str
+    algorithm: str
+    artifact_uri: str
+    artifact_sha256: str
+    training_data_hash: str
+    training_window_start: datetime
+    training_window_end: datetime
+    status: str
+    metrics: dict[str, Any]
+    created_by: str
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelEvaluationResponse(BaseModel):
+    id: str
+    model_id: str
+    metrics: dict[str, float]
+    quality_gate: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------

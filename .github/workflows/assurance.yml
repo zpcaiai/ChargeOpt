@@ -1,0 +1,33 @@
+name: Operational Assurance
+
+on:
+  schedule:
+    - cron: "17 0 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: chargeopt-operational-assurance
+  cancel-in-progress: false
+
+jobs:
+  shadow-and-slo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify assurance configuration
+        env:
+          CHARGEOPT_PRODUCTION_URL: ${{ secrets.CHARGEOPT_PRODUCTION_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          test -n "$CHARGEOPT_PRODUCTION_URL" || { echo "::error::CHARGEOPT_PRODUCTION_URL is required"; exit 1; }
+          test -n "$CRON_SECRET" || { echo "::error::CRON_SECRET is required"; exit 1; }
+      - name: Finalize prior UTC day and evaluate SLOs
+        env:
+          CHARGEOPT_PRODUCTION_URL: ${{ secrets.CHARGEOPT_PRODUCTION_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          response=$(curl --fail-with-body --retry 3 --retry-all-errors \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$CHARGEOPT_PRODUCTION_URL/api/cron/assurance")
+          echo "$response" | jq .
+          test "$(echo "$response" | jq -r '.status')" = "healthy"

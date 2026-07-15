@@ -116,3 +116,71 @@ async def test_trade_meter_settlement_and_breaker_endpoints(client):
         )
     assert breaker.status_code == 200
     assert breaker.json()["state"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_settlement_approval_dispute_export_payment_and_reversal_endpoints(client):
+    actions = [
+        (
+            "approve",
+            {"reason": "finance review complete"},
+            "approve_settlement_batch",
+            {"id": "stb-1", "status": "approved", "event_hash": "a" * 64},
+        ),
+        (
+            "dispute",
+            {"reason": "meter interval mismatch"},
+            "dispute_settlement_batch",
+            {"id": "stb-1", "status": "disputed", "event_hash": "b" * 64, "dispute_id": "std-1"},
+        ),
+        (
+            "resolve-dispute",
+            {"resolution": "meter evidence accepted", "accepted": True},
+            "resolve_settlement_dispute",
+            {"id": "stb-1", "status": "review", "event_hash": "c" * 64, "dispute_id": "std-1"},
+        ),
+        (
+            "export",
+            {"format": "csv", "destination": "finance-ledger"},
+            "export_settlement_batch",
+            {
+                "id": "stb-1",
+                "status": "exported",
+                "event_hash": "d" * 64,
+                "export_id": "stx-1",
+                "format": "csv",
+                "destination": "finance-ledger",
+                "content_hash": "e" * 64,
+                "row_count": 1,
+                "content": "trade_id,net_revenue\ntrd-1,100\n",
+            },
+        ),
+        (
+            "paid",
+            {"payment_reference": "PAY-2026-001"},
+            "mark_settlement_paid",
+            {
+                "id": "stb-1",
+                "status": "paid",
+                "event_hash": "f" * 64,
+                "payment_reference": "PAY-2026-001",
+            },
+        ),
+        (
+            "reverse",
+            {"reason": "bank payment reversal", "external_reference": "REV-001"},
+            "reverse_settlement_batch",
+            {
+                "id": "stb-1",
+                "status": "reversed",
+                "event_hash": "1" * 64,
+                "adjustment_id": "sta-1",
+                "amount": -100,
+            },
+        ),
+    ]
+    for path, body, function, result in actions:
+        with patch(f"chargeopt.app.{function}", return_value=result):
+            response = await client.post(f"/api/vpp/trading/settlement-batches/stb-1/{path}", json=body)
+        assert response.status_code == 200
+        assert response.json()["status"] == result["status"]

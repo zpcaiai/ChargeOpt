@@ -1,14 +1,8 @@
-"""Constrained dispatch optimizer.
-
-The solver is deterministic and dependency-free for serverless deployment. It
-uses a rolling-horizon dynamic program over discretized charge/discharge
-decisions. In optimization terms this is a compact MILP/MPC approximation:
-binary action choices are searched across the full horizon while SOC,
-transformer, reserve, ramp, degradation, and service constraints are enforced.
-"""
+"""Mixed-integer rolling-horizon dispatch optimizer with a safe local fallback."""
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from .analytics import forecast_load
@@ -38,19 +32,179 @@ def solve_dispatch_optimization(
         "max_hourly_ramp_ratio": 0.72,
         "soc_grid_resolution": 0.01,
         "time_step_hours": 1,
+        "charge_efficiency": 0.9,
+        "discharge_efficiency": 0.9,
+        "mip_relative_gap": 0.001,
+        "solver_time_limit_seconds": 20,
     }
+    solver = "scipy-highs-milp-mpc-v1"
+    solver_evidence: list[dict[str, Any]] = []
     for station in stations:
-        station_plan, station_score = _solve_station_mpc(repo, station, horizon_hours, objective, constraints)
+        try:
+            station_plan, station_score, evidence = _solve_station_milp(
+                repo, station, horizon_hours, objective, constraints
+            )
+        except ImportError as exc:
+            if _exact_solver_required():
+                raise RuntimeError("The production MILP solver is unavailable; dispatch is blocked.") from exc
+            solver = "discrete-mpc-dp-fallback-v2"
+            station_plan, station_score = _solve_station_mpc(repo, station, horizon_hours, objective, constraints)
+            evidence = {"station_id": station.id, "exact": False, "reason": "scipy_unavailable"}
         plan.extend(station_plan)
         objective_value += station_score
+        solver_evidence.append(evidence)
     return {
-        "solver": "risk-constrained-mpc-milp-dp-v2",
+        "solver": solver,
         "objective": objective,
         "objective_value": round(objective_value, 3),
         "dispatch_plan": plan,
-        "constraints": constraints,
+        "constraints": constraints | {"solver_evidence": solver_evidence},
         "inputs": {"tenant_id": tenant_id, "station_id": station_id, "horizon_hours": horizon_hours},
     }
+
+
+def _exact_solver_required() -> bool:
+    configured = os.environ.get("CHARGEOPT_REQUIRE_EXACT_SOLVER")
+    if configured is not None:
+        return configured.lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("ENVIRONMENT") == "production" or os.environ.get("VERCEL_ENV") == "production"
+
+
+def _solve_station_milp(repo, station, horizon_hours: int, objective: str, constraints: dict[str, Any]):
+    try:
+        import numpy as np
+        from scipy.optimize import Bounds, LinearConstraint, milp
+    except ImportError:
+        raise
+
+    tariff = repo.tariff_for(station)
+    points = repo.station_points(station.id)
+    initial_soc = float(points[-1].storage_soc)
+    base_forecast = forecast_load(repo, station.id)
+    forecast = [base_forecast[index % len(base_forecast)] for index in range(horizon_hours)]
+    n = len(forecast)
+    charge = list(range(0, n))
+    discharge = list(range(n, 2 * n))
+    soc = list(range(2 * n, 3 * n))
+    grid = list(range(3 * n, 4 * n))
+    charge_mode = list(range(4 * n, 5 * n))
+    discharge_mode = list(range(5 * n, 6 * n))
+    peak = 6 * n
+    size = peak + 1
+
+    c = np.zeros(size)
+    energy_weight = 1.0 if objective == "cost" else 0.25 if objective == "revenue" else 0.8
+    demand_weight = 1.0 if objective == "cost" else 0.35 if objective == "revenue" else 0.8
+    for step, row in enumerate(forecast):
+        hour = int(row["label"].split(":", 1)[0])
+        price = float(tariff.price_at(hour))
+        c[grid[step]] = price * energy_weight
+        c[charge[step]] = 0.055
+        c[discharge[step]] = 0.055 + (0.27 * max(0, int(row["queue_length"]) - 2))
+        c[charge_mode[step]] = 1e-5
+        c[discharge_mode[step]] = 1e-5
+    c[peak] = float(tariff.demand_charge_per_kw_month) / 30 * demand_weight
+
+    lb = np.zeros(size)
+    ub = np.full(size, np.inf)
+    power_limit = max(0.0, float(station.storage_power_kw))
+    transformer_limit = float(station.transformer_capacity_kw) * constraints["transformer_max_ratio"]
+    for step in range(n):
+        ub[charge[step]] = power_limit
+        ub[discharge[step]] = power_limit
+        lb[soc[step]] = constraints["soc_min"]
+        ub[soc[step]] = constraints["soc_max"]
+        ub[grid[step]] = transformer_limit
+        ub[charge_mode[step]] = 1
+        ub[discharge_mode[step]] = 1
+    ub[peak] = transformer_limit
+    integrality = np.zeros(size)
+    integrality[charge_mode] = 1
+    integrality[discharge_mode] = 1
+
+    rows: list[Any] = []
+    lower: list[float] = []
+    upper: list[float] = []
+
+    def add(coefficients: dict[int, float], low: float, high: float) -> None:
+        row = np.zeros(size)
+        for index, value in coefficients.items():
+            row[index] = value
+        rows.append(row)
+        lower.append(low)
+        upper.append(high)
+
+    capacity = max(1.0, float(station.storage_capacity_kwh))
+    eta_charge = constraints["charge_efficiency"]
+    eta_discharge = constraints["discharge_efficiency"]
+    ramp = power_limit * constraints["max_hourly_ramp_ratio"]
+    for step, row in enumerate(forecast):
+        base_grid = float(row["grid_kw"])
+        add({grid[step]: 1, charge[step]: -1, discharge[step]: 1}, base_grid, base_grid)
+        soc_coefficients = {
+            soc[step]: 1,
+            charge[step]: -(eta_charge / capacity),
+            discharge[step]: 1 / (eta_discharge * capacity),
+        }
+        if step == 0:
+            add(soc_coefficients, initial_soc, initial_soc)
+        else:
+            soc_coefficients[soc[step - 1]] = -1
+            add(soc_coefficients, 0, 0)
+        add({charge[step]: 1, charge_mode[step]: -power_limit}, -np.inf, 0)
+        add({discharge[step]: 1, discharge_mode[step]: -power_limit}, -np.inf, 0)
+        add({charge_mode[step]: 1, discharge_mode[step]: 1}, -np.inf, 1)
+        ramp_coefficients = {charge[step]: 1, discharge[step]: -1}
+        if step > 0:
+            ramp_coefficients[charge[step - 1]] = -1
+            ramp_coefficients[discharge[step - 1]] = 1
+        add(ramp_coefficients, -ramp, ramp)
+        add({grid[step]: 1, peak: -1}, -np.inf, 0)
+    add({soc[-1]: 1}, constraints["vpp_reserve_soc"], np.inf)
+
+    result = milp(
+        c,
+        integrality=integrality,
+        bounds=Bounds(lb, ub),
+        constraints=LinearConstraint(np.asarray(rows), np.asarray(lower), np.asarray(upper)),
+        options={
+            "time_limit": constraints["solver_time_limit_seconds"],
+            "mip_rel_gap": constraints["mip_relative_gap"],
+            "presolve": True,
+        },
+    )
+    if not result.success or result.x is None:
+        raise RuntimeError(f"MILP dispatch is infeasible or unsolved for {station.id}: {result.message}")
+
+    solution = result.x
+    plan = []
+    for step, row in enumerate(forecast):
+        power = float(solution[charge[step]] - solution[discharge[step]])
+        projected_grid = float(solution[grid[step]])
+        hour = int(row["label"].split(":", 1)[0])
+        price = float(tariff.price_at(hour))
+        plan.append(
+            {
+                "station_id": station.id,
+                "label": row["label"],
+                "action": _action(power),
+                "power_kw": round(power, 1),
+                "projected_grid_kw": round(projected_grid, 1),
+                "projected_soc": round(float(solution[soc[step]]) * 100, 1),
+                "constraint_margin_kw": round(transformer_limit - projected_grid, 1),
+                "risk_adjusted_cost": round(float(c[grid[step]] * projected_grid + 0.055 * abs(power)), 2),
+                "shadow_price": round(_shadow_price(projected_grid, price, station, tariff), 3),
+            }
+        )
+    evidence = {
+        "station_id": station.id,
+        "exact": True,
+        "solver_status": int(result.status),
+        "mip_gap": round(float(getattr(result, "mip_gap", 0.0) or 0.0), 8),
+        "node_count": int(getattr(result, "mip_node_count", 0) or 0),
+        "objective_cost": round(float(result.fun), 5),
+    }
+    return plan, -float(result.fun), evidence
 
 
 def _solve_station_mpc(repo, station, horizon_hours: int, objective: str, constraints: dict[str, Any]):

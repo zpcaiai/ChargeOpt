@@ -17,17 +17,17 @@ The production control plane closes the loop from station economics through mark
 3. Forecasting
    Calibrated probabilistic load and flexibility forecasts expose P10/P50/P90 bands, data freshness, model version, and calibration score. A seasonal-recency ensemble with conformal residual bounds is the safe cold-start model; station-specific trained models can implement the same evidence contract.
 
-4. Optimization
-   Station MPC enforces SOC, transformer, reserve, ramp, degradation, and service constraints. Portfolio bidding uses conservative quantile capacity, reserve margins, expected-shortfall exposure, price floors, daily energy caps, and station reliability allocations. Every run persists its inputs, outputs, model version, and constraint evidence.
+4. Optimization and MLOps
+   HiGHS mixed-integer rolling MPC enforces binary charge/discharge exclusivity, SOC dynamics, transformer capacity, reserve, ramp, degradation, demand peak, and service constraints. Portfolio bidding uses conservative quantile capacity and risk limits. Model artifacts and training data are hash-addressed; quantile backtests, calibration, drift, shadow state, and maker-checker promotion are persisted.
 
 5. Market and execution
-   A signed, idempotent market gateway adapter manages order submission while an immutable hash-chained event ledger enforces legal order-state transitions. Trade fills create station delivery schedules and leased edge tasks. Equipment control remains gateway-mediated and receipt-driven; failed or rolled-back VPP dispatch opens the tenant circuit breaker.
+   A signed, idempotent market gateway adapter manages order submission while an immutable hash-chained event ledger enforces legal order-state transitions. Trade fills create station delivery schedules and leased edge tasks. Equipment control remains gateway-mediated and receipt-driven; protocol ingress and edge receipts carry durable tenant-scoped idempotency keys, and failed or rolled-back VPP dispatch opens the tenant circuit breaker.
 
 6. Metering and settlement
-   Signed interval evidence records baseline, actual grid power, delivery, quality flags, source, and evidence hashes. Settlement batches calculate committed/delivered energy, performance, gross revenue, imbalance cost, penalties, net revenue, and a deterministic evidence root for finance review and disputes.
+   Signed interval evidence records baseline, actual grid power, delivery, quality flags, source, and evidence hashes. Settlement batches calculate committed/delivered energy, performance, gross revenue, imbalance cost, penalties, and net revenue. Immutable lines and hash-chained events support maker-checker approval, disputes, deterministic exports, payment references, and append-only reversal adjustments.
 
-7. Autopilot operations
-   GitHub Actions triggers an idempotent five-minute control cycle through a secret-protected Vercel endpoint. Active risk policy, fresh telemetry, a closed circuit breaker, approved limits, and configured market credentials are mandatory. Duplicate cycles are rejected by a tenant/cycle unique key; three market failures open the breaker. The scheduler can be replaced by a dedicated production scheduler without changing the cycle contract.
+7. Autopilot operations and assurance
+   Two or more workers safely compete for leased tasks and outbox records; tenant/cycle keys make automation retries idempotent. GitHub Actions remains a fallback trigger, and migrations serialize through a PostgreSQL advisory lock. Heartbeats, SLO measurements, incidents, dead letters, reconciliation mismatches, immutable daily shadow evidence, and Neon point-in-time restore drills form the operational evidence layer.
 
 8. Revenue proof
    Charging revenue, energy purchase cost, demand charge exposure, storage arbitrage, demand charge savings, VPP revenue, battery degradation, payback, NPV, IRR, and monthly counterfactual profit lift. This layer answers the commercial question: "same site, with ChargeOpt vs. without ChargeOpt, how much more did the operator earn or avoid losing this month?" Proof runs can be persisted as tenant-scoped evidence snapshots for monthly business reviews.
@@ -42,14 +42,14 @@ The production control plane closes the loop from station economics through mark
 - Moat scorecard: combines operating data hours, adapter protocols, ROI case count, and monthly profit proof into a defensibility signal.
 - Evidence persistence: `revenue_proof_runs` stores the full proof payload, confidence bounds, monthly impact, algorithm version, station scope, creator, and tenant context.
 
-The current implementation is deterministic and serverless-safe. In larger deployments, the same API contract can be backed by full synthetic-control models, causal-impact/BSTS models, Pyomo/CVXPY/OR-Tools solvers, or commercial MILP solvers.
+The cold-start revenue model remains deterministic until enough customer history exists. Trained causal models must enter through the same registry, evaluation, shadow, drift, and approval contract; the platform does not label an unvalidated model as production-ready.
 
 ## Extension Points
 
 - Repository layer: PostgreSQL-backed tenant-scoped reads with in-memory local fallback.
-- Gateway adapters: OCPP, Modbus, MQTT normalized ingress; IEC 104 and OPC UA can follow the same signed protocol contract.
+- Gateway adapters: mTLS OCPP 1.6 central system, TLS MQTT QoS ingestion/commands, and Modbus TCP polling/writes inside an attested network boundary; IEC 104 and OPC UA can follow the same contract.
 - Market adapters: `sandbox` for certification drills and `signed_rest` for a venue/aggregator gateway. Secrets are resolved by `credential_ref` and never stored in Postgres.
-- Optimizers: replace the dependency-free MPC/MILP dynamic program with CVXPY/Pyomo/OR-Tools/commercial solvers when the deployment environment supports them.
+- Optimizers: the production default is SciPy/HiGHS MILP; customer-specific commercial solvers can implement the same evidence contract.
 - ML forecasts: replace explainable seasonal forecast with trained station-specific models.
 - Control plane: users/sessions/RBAC, tenant scoping, RLS policies, approvals, task queue, worker leases, receipts, VPP settlements, revenue-proof snapshots, and audit trail.
 
@@ -62,3 +62,5 @@ The current implementation is deterministic and serverless-safe. In larger deplo
 - Automatic dispatch stays inside pre-approved safety boundaries and requires edge-gateway validation and receipts.
 - Async work must be claimed with a bounded lease, completed by the owning worker, and reaped when a lease expires.
 - Stale telemetry, missing credentials, invalid signatures, illegal state transitions, and open breakers fail closed.
+- Runtime database access always assumes the non-owner `chargeopt_app` role. Missing tenant context returns no tenant rows, while platform-wide `*` access is explicit and auditable.
+- Live market submission requires verified external certificate/qualification/device attestations plus 30 consecutive qualified shadow days; these facts cannot be created by source code.

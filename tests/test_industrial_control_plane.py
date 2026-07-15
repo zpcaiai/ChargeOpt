@@ -45,10 +45,11 @@ def test_optimizer_generates_constrained_plan(repo):
 
     result = solve_dispatch_optimization(repo, "t-001", None, 4, "balanced")
 
-    assert result["solver"] == "risk-constrained-mpc-milp-dp-v2"
+    assert result["solver"] == "scipy-highs-milp-mpc-v1"
     assert len(result["dispatch_plan"]) >= 4
     assert result["constraints"]["soc_min"] == 0.24
     assert "shadow_price" in result["dispatch_plan"][0]
+    assert all(item["exact"] is True for item in result["constraints"]["solver_evidence"])
 
 
 @pytest.mark.asyncio
@@ -312,7 +313,7 @@ def test_repository_task_worker_lifecycle_and_revenue_proof_persistence():
     conn2 = MagicMock()
     conn2.transaction.return_value.__enter__ = lambda s: s
     conn2.transaction.return_value.__exit__ = MagicMock(return_value=False)
-    conn2.execute.side_effect = [complete_select, MagicMock(), complete_update, MagicMock()]
+    conn2.execute.side_effect = [MagicMock(), complete_select, MagicMock(), complete_update, MagicMock()]
     ctx2 = MagicMock()
     ctx2.__enter__ = lambda s: conn2
     ctx2.__exit__ = MagicMock(return_value=False)

@@ -46,6 +46,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise SystemExit("--tenant-id is required for tenant-scoped roles.")
 
     with psycopg.connect(database_url) as conn, conn.transaction():
+        conn.execute("SET LOCAL ROLE chargeopt_app")
         conn.execute("SELECT set_config('chargeopt.tenant_id', '*', true)")
         existing = conn.execute(
             "SELECT id FROM chargeopt.users WHERE lower(email) = lower(%s)",

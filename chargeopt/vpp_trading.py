@@ -49,6 +49,8 @@ class MarketAdapter(Protocol):
 
     def cancel_order(self, order: dict[str, Any]) -> MarketSubmission: ...
 
+    def query_order(self, order: dict[str, Any]) -> MarketSubmission: ...
+
 
 class SandboxMarketAdapter:
     """Deterministic exchange simulator used for certification and disaster drills."""
@@ -59,6 +61,12 @@ class SandboxMarketAdapter:
 
     def cancel_order(self, order: dict[str, Any]) -> MarketSubmission:
         return MarketSubmission(True, str(order.get("market_order_id") or ""), "cancelled", {"venue": "sandbox"})
+
+    def query_order(self, order: dict[str, Any]) -> MarketSubmission:
+        market_order_id = str(order.get("market_order_id") or "")
+        if not market_order_id:
+            return MarketSubmission(False, None, "unknown", {"venue": "sandbox", "found": False})
+        return MarketSubmission(True, market_order_id, str(order.get("status") or "submitted"), {"venue": "sandbox"})
 
 
 class SignedRestMarketAdapter:
@@ -83,13 +91,19 @@ class SignedRestMarketAdapter:
             raise ValueError("market_order_id is required for cancellation")
         return self._request("POST", f"/v1/orders/{market_order_id}/cancel", {"reason": "operator_or_risk"})
 
+    def query_order(self, order: dict[str, Any]) -> MarketSubmission:
+        market_order_id = order.get("market_order_id")
+        if not market_order_id:
+            raise ValueError("market_order_id is required for reconciliation")
+        return self._request("GET", f"/v1/orders/{market_order_id}", {})
+
     def _request(self, method: str, path: str, payload: dict[str, Any]) -> MarketSubmission:
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str).encode()
         timestamp = str(int(datetime.now(UTC).timestamp()))
         signature = hmac.new(self.signing_secret, timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
         request = urllib.request.Request(
             f"{self.base_url}{path}",
-            data=body,
+            data=None if method == "GET" else body,
             method=method,
             headers={
                 "Authorization": f"Bearer {self.token}",
@@ -124,6 +138,10 @@ def build_market_adapter(connection: dict[str, Any]) -> MarketAdapter:
         return SandboxMarketAdapter()
     if connection["mode"] != "live" or not connection.get("enabled"):
         raise RuntimeError("market connection is not enabled for live trading")
+    readiness = connection.get("live_readiness") or {}
+    if not readiness.get("ready"):
+        blockers = ",".join(readiness.get("blockers") or ["readiness_evidence_missing"])
+        raise RuntimeError(f"live market readiness gate blocked: {blockers}")
     credential_ref = str(connection.get("credential_ref") or "CHARGEOPT_MARKET")
     token = os.environ.get(f"{credential_ref}_TOKEN")
     signing_secret = os.environ.get(f"{credential_ref}_SIGNING_SECRET")

@@ -36,20 +36,28 @@ def main() -> None:
 
     applied = 0
     with psycopg.connect(database_url) as conn:
-        for migration_path in sorted(MIGRATIONS.glob("*.sql")):
-            version = migration_path.stem
-            row = conn.execute("SELECT 1 FROM chargeopt.schema_migrations WHERE version = %s", (version,)).fetchone()
-            if row:
-                print(f"  skip  {version} (already applied)")
-                continue
-            t_mig = time.monotonic()
-            print(f"  apply {version} …", end=" ", flush=True)
-            with conn.transaction():
-                conn.execute(migration_path.read_text(encoding="utf-8"))
-                conn.execute("INSERT INTO chargeopt.schema_migrations (version) VALUES (%s)", (version,))
-            elapsed_ms = round((time.monotonic() - t_mig) * 1000)
-            print(f"done ({elapsed_ms} ms)")
-            applied += 1
+        # Serialize deploys across GitHub, Vercel, and operator-triggered runs.
+        # The lock is session-scoped and survives each migration transaction.
+        conn.execute("SELECT pg_advisory_lock(%s)", (763418205,))
+        try:
+            for migration_path in sorted(MIGRATIONS.glob("*.sql")):
+                version = migration_path.stem
+                row = conn.execute(
+                    "SELECT 1 FROM chargeopt.schema_migrations WHERE version = %s", (version,)
+                ).fetchone()
+                if row:
+                    print(f"  skip  {version} (already applied)")
+                    continue
+                t_mig = time.monotonic()
+                print(f"  apply {version} …", end=" ", flush=True)
+                with conn.transaction():
+                    conn.execute(migration_path.read_text(encoding="utf-8"))
+                    conn.execute("INSERT INTO chargeopt.schema_migrations (version) VALUES (%s)", (version,))
+                elapsed_ms = round((time.monotonic() - t_mig) * 1000)
+                print(f"done ({elapsed_ms} ms)")
+                applied += 1
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (763418205,))
 
     total_ms = round((time.monotonic() - t_start) * 1000)
     print(f"ChargeOpt migrations complete: {applied} applied in {total_ms} ms.")

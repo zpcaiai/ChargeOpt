@@ -179,4 +179,8 @@ def test_health_check_with_pool():
     assert result["db"] == "ok"
     assert result["pool_available"] == 5
     assert result["pool_size"] == 10
-    mock_conn.execute.assert_called_once_with("SELECT 1")
+    assert [call.args[0] for call in mock_conn.execute.call_args_list] == [
+        "SET ROLE chargeopt_app",
+        "SELECT 1",
+        "RESET ROLE",
+    ]
