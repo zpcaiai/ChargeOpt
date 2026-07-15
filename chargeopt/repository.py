@@ -1202,7 +1202,7 @@ def record_edge_receipt(
     receipt_id = f"rcp-{uuid4().hex}"
     with get_connection() as conn, conn.transaction():
         task_row = conn.execute(
-            "SELECT tenant_id, station_id, device_id FROM chargeopt.task_queue WHERE id = %s",
+            "SELECT tenant_id, station_id, device_id, payload FROM chargeopt.task_queue WHERE id = %s",
             (task_id,),
         ).fetchone()
         if task_row is None:
@@ -1210,6 +1210,7 @@ def record_edge_receipt(
         tenant_id = str(task_row[0])
         task_station_id = str(task_row[1]) if task_row[1] is not None else None
         task_device_id = str(task_row[2]) if task_row[2] is not None else None
+        task_payload = task_row[3] if len(task_row) > 3 and isinstance(task_row[3], dict) else {}
         _ensure_tenant_allowed(scope_tenant_id, tenant_id)
         if station_id is not None and task_station_id is not None and station_id != task_station_id:
             raise PermissionError("Receipt station_id does not match task station_id.")
@@ -1262,6 +1263,33 @@ def record_edge_receipt(
             """,
             (f"au-{uuid4().hex}", tenant_id, task_id, status),
         )
+        if task_payload.get("command") == "vpp.dispatch":
+            schedule_id = task_payload.get("schedule_id")
+            schedule_status = (
+                "dispatched"
+                if status == "succeeded"
+                else "failed"
+                if status in {"failed", "rolled_back"}
+                else "delivering"
+            )
+            if schedule_id:
+                conn.execute(
+                    "UPDATE chargeopt.delivery_schedules SET status=%s, updated_at=now() WHERE id=%s AND tenant_id=%s",
+                    (schedule_status, schedule_id, tenant_id),
+                )
+            if status in {"failed", "rolled_back"}:
+                conn.execute(
+                    """
+                    INSERT INTO chargeopt.vpp_circuit_breakers (
+                        id,tenant_id,scope,state,reason,failure_count,opened_at,updated_by
+                    ) VALUES (%s,%s,'global','open',%s,1,now(),'edge-gateway')
+                    ON CONFLICT (tenant_id,scope) DO UPDATE SET
+                        state='open', reason=EXCLUDED.reason,
+                        failure_count=chargeopt.vpp_circuit_breakers.failure_count+1,
+                        opened_at=now(), updated_by='edge-gateway', updated_at=now()
+                    """,
+                    (f"cb-{uuid4().hex}", tenant_id, f"vpp_dispatch_{status}:{task_id}"),
+                )
     return {"id": receipt_id, "task_id": task_id, "status": status}
 
 

@@ -11,3 +11,6 @@ secrets/*.secret
 .env.*
 !.env.example
 .vercel
+api/.python-version
+api/pyproject.toml
+api/uv.lock

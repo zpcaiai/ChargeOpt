@@ -23,7 +23,12 @@ def configure_logging(log_level: str = "info", json_logs: bool = False) -> None:
     if json_logs:
         renderer = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
+        # Plain exception rendering avoids Rich syntax-highlighting entire
+        # nested ASGI exception groups, which can stall test and local logs.
+        renderer = structlog.dev.ConsoleRenderer(
+            colors=sys.stderr.isatty(),
+            exception_formatter=structlog.dev.plain_traceback,
+        )
 
     structlog.configure(
         processors=[

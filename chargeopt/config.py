@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # ── Application ──────────────────────────────────────────────────────────
     app_name: str = "ChargeOpt OS"
-    app_version: str = "0.2.0"
+    app_version: str = "1.0.0"
     environment: Literal["development", "staging", "production"] = "development"
     debug: bool = False
 
@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # ── Security ──────────────────────────────────────────────────────────────
     api_key: str | None = None
     api_key_header: str = "X-API-Key"
+    cron_secret: str | None = None
+    market_webhook_secret: str | None = None
     cors_origins: str = "*"
     cors_allow_credentials: bool = False
 
@@ -59,6 +61,11 @@ class Settings(BaseSettings):
     edge_gateway_url: str | None = None
     edge_gateway_token: str | None = None
     worker_poll_interval_seconds: float = Field(default=5.0, gt=0)
+
+    # VPP automation defaults are fail-closed. Live credentials are resolved
+    # through each market connection's credential_ref.
+    vpp_automation_enabled: bool = False
+    vpp_max_orders_per_cycle: int = Field(default=8, ge=1, le=96)
 
     @property
     def cors_origins_list(self) -> list[str]:

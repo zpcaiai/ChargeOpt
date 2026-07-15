@@ -94,3 +94,24 @@ def test_force_rls_migration_covers_tenant_write_tables():
     assert "ALTER TABLE IF EXISTS chargeopt.task_queue FORCE ROW LEVEL SECURITY" in sql
     assert "ALTER TABLE IF EXISTS chargeopt.edge_command_receipts FORCE ROW LEVEL SECURITY" in sql
     assert "ALTER TABLE IF EXISTS chargeopt.revenue_proof_runs FORCE ROW LEVEL SECURITY" in sql
+
+
+def test_vpp_trading_migration_has_full_tenant_and_audit_controls():
+    sql = (Path(__file__).resolve().parents[1] / "migrations" / "007_vpp_trading_platform.sql").read_text(
+        encoding="utf-8"
+    )
+
+    for table in (
+        "market_orders",
+        "market_order_events",
+        "market_trades",
+        "delivery_schedules",
+        "vpp_meter_intervals",
+        "vpp_settlement_batches",
+        "vpp_circuit_breakers",
+        "vpp_automation_runs",
+    ):
+        assert f"chargeopt.{table}" in sql
+    assert "FORCE ROW LEVEL SECURITY" in sql
+    assert "prevent_order_event_mutation" in sql
+    assert "idempotency_key text NOT NULL" in sql

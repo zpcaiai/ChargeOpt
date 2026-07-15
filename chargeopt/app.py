@@ -13,6 +13,7 @@ import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -60,6 +61,8 @@ from .schemas import (
     AlertAcknowledgeRequest,
     AlertAcknowledgeResponse,
     AuditResponse,
+    CircuitBreakerRequest,
+    CircuitBreakerResponse,
     DispatchApprovalRequest,
     DispatchApprovalResponse,
     DispatchGenerateRequest,
@@ -72,6 +75,8 @@ from .schemas import (
     HealthResponse,
     LoginRequest,
     LoginResponse,
+    MarketTradeResponse,
+    MarketTradeWebhookRequest,
     OptimizationRunRequest,
     OptimizationRunResponse,
     OverviewResponse,
@@ -97,10 +102,26 @@ from .schemas import (
     TaskResponse,
     TelemetryIngestRequest,
     TelemetryIngestResponse,
+    VppAutomationRunRequest,
+    VppAutomationRunResponse,
+    VppMeterIntervalRequest,
+    VppMeterIntervalResponse,
     VppResponse,
+    VppSettlementBatchRequest,
+    VppSettlementBatchResponse,
     VppSettlementRequest,
     VppSettlementResponse,
+    VppTradingDashboardResponse,
 )
+from .vpp_automation import run_all_automation_cycles, run_automation_cycle
+from .vpp_repository import (
+    create_settlement_batch,
+    ingest_meter_interval,
+    record_trade_fill,
+    set_circuit_breaker,
+    trading_dashboard,
+)
+from .vpp_trading import verify_market_webhook
 
 logger = structlog.get_logger(__name__)
 
@@ -187,7 +208,12 @@ def create_app(use_lifespan: bool = True) -> FastAPI:
 
     @app.exception_handler(500)
     async def _server_error_handler(request: Request, exc) -> JSONResponse:
-        logger.exception("Unhandled server error", path=str(request.url.path))
+        logger.error(
+            "Unhandled server error",
+            path=str(request.url.path),
+            error_type=type(exc).__name__,
+            exc_info=s.is_production,
+        )
         return JSONResponse(
             status_code=500,
             content=ProblemDetail(
@@ -244,8 +270,8 @@ def create_app(use_lifespan: bool = True) -> FastAPI:
         t0 = time.perf_counter()
         try:
             response: Response = await call_next(request)
-        except Exception:
-            logger.exception("Unhandled exception")
+        except Exception as exc:
+            logger.error("Unhandled exception", error_type=type(exc).__name__, exc_info=s.is_production)
             raise
         elapsed = time.perf_counter() - t0
         response.headers[s.request_id_header] = request_id
@@ -352,6 +378,9 @@ TelemetryWriteDep = Depends(require_write_permission("telemetry:write"))
 DeviceWriteDep = Depends(require_write_permission("device:write"))
 TaskWriteDep = Depends(require_write_permission("task:write"))
 VppSettleDep = Depends(require_write_permission("vpp:settle"))
+VppTradeDep = Depends(require_write_permission("vpp:trade"))
+VppMeterWriteDep = Depends(require_write_permission("vpp:meter:write"))
+VppOperateDep = Depends(require_write_permission("vpp:operate"))
 AuditReadDep = Depends(require_permission("audit:read"))
 
 
@@ -437,6 +466,14 @@ def _register_ops_routes(app: FastAPI, s: Any) -> None:
         _update_gauges()
         data = generate_latest()
         return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+    @app.get("/api/cron/vpp-cycle", tags=["ops"], include_in_schema=False)
+    async def _vpp_cron(authorization: str | None = Header(default=None)):
+        if not s.cron_secret or not hmac.compare_digest(authorization or "", f"Bearer {s.cron_secret}"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid cron credentials.")
+        if not s.vpp_automation_enabled:
+            return {"status": "disabled", "tenant_count": 0, "results": []}
+        return run_all_automation_cycles(trigger_source="vercel-cron")
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +970,219 @@ def _build_v1_router(s: Any) -> APIRouter:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    @router.get("/vpp/trading/dashboard", response_model=VppTradingDashboardResponse)
+    @limiter.limit(rl)
+    async def _vpp_trading_dashboard(request: Request, _auth: Principal = AuthDep) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        if not s.use_db:
+            return {
+                "generated_at": datetime.now(UTC),
+                "connection": {
+                    "id": "local-sandbox",
+                    "market_code": "LOCAL-SANDBOX",
+                    "participant_id": tenant_id,
+                    "adapter": "sandbox",
+                    "mode": "sandbox",
+                    "enabled": False,
+                },
+                "risk_policy": {
+                    "id": "local-read-only",
+                    "name": "Local read-only guardrails",
+                    "version": 1,
+                    "auto_trade_enabled": False,
+                    "auto_dispatch_enabled": False,
+                },
+                "circuit_breaker": {"state": "closed", "reason": "local_read_only"},
+                "metrics": {
+                    "submitted_kw_24h": 0,
+                    "filled_kw_24h": 0,
+                    "failed_orders_24h": 0,
+                    "risk_rejections_24h": 0,
+                    "open_orders": 0,
+                    "committed_energy_kwh": 0,
+                },
+                "orders": [],
+                "automation_runs": [],
+                "settlements": [],
+            }
+        try:
+            return trading_dashboard(tenant_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/automation/run",
+        response_model=VppAutomationRunResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    @limiter.limit("12/minute")
+    async def _run_vpp_automation(
+        request: Request,
+        body: VppAutomationRunRequest,
+        _auth: Principal = VppTradeDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return run_automation_cycle(
+                tenant_id,
+                trigger_source=body.trigger_source,
+                actor=_auth.subject,
+                max_orders_per_cycle=s.vpp_max_orders_per_cycle,
+            )
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/trades",
+        response_model=MarketTradeResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _record_vpp_trade(
+        request: Request,
+        body: MarketTradeWebhookRequest,
+        _auth: Principal = VppTradeDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        try:
+            return record_trade_fill(
+                tenant_id,
+                body.order_id,
+                body.market_trade_id,
+                body.quantity_kw,
+                body.price_per_kwh,
+                body.traded_at,
+                _auth.subject,
+                body.payload,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/market-webhook",
+        response_model=MarketTradeResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    @limiter.limit(rl)
+    async def _market_trade_webhook(
+        request: Request,
+        x_chargeopt_tenant: str = Header(),
+        x_chargeopt_timestamp: str = Header(),
+        x_chargeopt_signature: str = Header(),
+    ) -> Any:
+        raw_body = await request.body()
+        if not s.market_webhook_secret or not verify_market_webhook(
+            raw_body,
+            x_chargeopt_timestamp,
+            x_chargeopt_signature,
+            s.market_webhook_secret,
+        ):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid market webhook signature.")
+        try:
+            body = MarketTradeWebhookRequest.model_validate_json(raw_body)
+            return record_trade_fill(
+                x_chargeopt_tenant,
+                body.order_id,
+                body.market_trade_id,
+                body.quantity_kw,
+                body.price_per_kwh,
+                body.traded_at,
+                "market-webhook",
+                body.payload,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/meter-intervals",
+        response_model=VppMeterIntervalResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    @limiter.limit(rl)
+    async def _vpp_meter_interval(
+        request: Request,
+        body: VppMeterIntervalRequest,
+        _auth: Principal = VppMeterWriteDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        payload = body.model_dump()
+        payload["payload"] = body.payload
+        try:
+            return ingest_meter_interval(tenant_id, payload, _auth.subject)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+    @router.post(
+        "/vpp/trading/settlement-batches",
+        response_model=VppSettlementBatchResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _vpp_settlement_batch(
+        request: Request,
+        body: VppSettlementBatchRequest,
+        _auth: Principal = VppSettleDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        if body.period_end <= body.period_start:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="period_end must be later than period_start"
+            )
+        try:
+            return create_settlement_batch(
+                tenant_id,
+                body.market_code,
+                body.period_start,
+                body.period_end,
+                _auth.subject,
+                imbalance_price_per_kwh=body.imbalance_price_per_kwh,
+                penalty_rate=body.penalty_rate,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    @router.post("/vpp/trading/circuit-breaker", response_model=CircuitBreakerResponse)
+    @limiter.limit("12/minute")
+    async def _set_vpp_circuit_breaker(
+        request: Request,
+        body: CircuitBreakerRequest,
+        _auth: Principal = VppOperateDep,
+    ) -> Any:
+        tenant_id = _auth.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+            )
+        return set_circuit_breaker(tenant_id, body.state, body.reason, _auth.subject, body.reset_after)
 
     return router
 

@@ -1,9 +1,11 @@
 const state = {
   overview: null,
   revenueDiagnostics: null,
+  trading: null,
   stationDetail: null,
   selectedStationId: null,
   lang: localStorage.getItem("lang") || "zh",
+  token: sessionStorage.getItem("chargeoptToken"),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -17,9 +19,11 @@ const TRANSLATIONS = {
     "nav.dispatch": "调度", "nav.dispatch.title": "调度中心",
     "nav.roi": "ROI", "nav.roi.title": "储能ROI模拟",
     "nav.vpp": "VPP", "nav.vpp.title": "VPP资源",
-    "mode.label": "控制模式", "mode.value": "建议模式", "mode.hint": "需人工审批",
+    "nav.trading": "交易", "nav.trading.title": "VPP 自动交易",
+    "mode.label": "控制模式", "mode.value": "自动交易", "mode.hint": "风控策略已启用",
     "header.title": "能源调度运营中心", "header.loading": "加载中...",
-    "btn.refresh": "刷新数据",
+    "btn.refresh": "刷新数据", "btn.logout": "退出登录",
+    "login.title": "安全登录", "login.desc": "使用租户运营账号进入自动交易控制台", "login.email": "邮箱", "login.password": "密码", "login.submit": "登录",
     "metric.health": "组合健康度", "metric.health.unit": "评分",
     "metric.revenue": "今日收入",
     "metric.margin": "毛利润",
@@ -49,6 +53,9 @@ const TRANSLATIONS = {
     "live": "实时数据", "stations": "个站点", "generated": "生成于",
     "recommendations": "条建议", "no.alerts": "无告警。",
     "proof.monthly": "月度净增益", "proof.annual": "年化增益", "proof.confidence": "P90置信区间",
+    "trade.market": "交易市场", "trade.openOrders": "未结订单", "trade.orders": "笔", "trade.filled": "24h 成交", "trade.breaker": "熔断器",
+    "trade.ordersTitle": "市场订单", "trade.ordersDesc": "报价、成交、交付窗口和风险状态", "trade.status": "状态", "trade.product": "产品", "trade.delivery": "交付", "trade.quantity": "容量", "trade.price": "限价", "trade.fill": "成交",
+    "trade.autopilot": "自动交易", "trade.autopilotDesc": "预测、风控、报价与场站调度闭环", "trade.settlements": "结算与证据", "trade.settlementsDesc": "计量基线、偏差费用、罚金和证据根哈希",
   },
   en: {
     "nav.cockpit": "Cockpit", "nav.cockpit.title": "Operating cockpit",
@@ -56,9 +63,11 @@ const TRANSLATIONS = {
     "nav.dispatch": "Dispatch", "nav.dispatch.title": "Dispatch center",
     "nav.roi": "ROI", "nav.roi.title": "Storage ROI simulator",
     "nav.vpp": "VPP", "nav.vpp.title": "VPP resources",
-    "mode.label": "Control Mode", "mode.value": "Recommendation", "mode.hint": "Approval required",
+    "nav.trading": "Trading", "nav.trading.title": "Automated VPP trading",
+    "mode.label": "Control Mode", "mode.value": "Autopilot", "mode.hint": "Risk policy active",
     "header.title": "Energy Dispatch Operations", "header.loading": "Loading portfolio...",
-    "btn.refresh": "Refresh data",
+    "btn.refresh": "Refresh data", "btn.logout": "Sign out",
+    "login.title": "Secure sign in", "login.desc": "Use your tenant operator account to open the trading control plane", "login.email": "Email", "login.password": "Password", "login.submit": "Sign in",
     "metric.health": "Portfolio Health", "metric.health.unit": "score",
     "metric.revenue": "Today Revenue",
     "metric.margin": "Gross Margin",
@@ -88,6 +97,9 @@ const TRANSLATIONS = {
     "live": "Live fixture", "stations": "stations", "generated": "generated",
     "recommendations": "recommendations", "no.alerts": "No alerts.",
     "proof.monthly": "Monthly net lift", "proof.annual": "Annualized lift", "proof.confidence": "P90 interval",
+    "trade.market": "Market", "trade.openOrders": "Open orders", "trade.orders": "orders", "trade.filled": "24h filled", "trade.breaker": "Circuit breaker",
+    "trade.ordersTitle": "Market orders", "trade.ordersDesc": "Bid, fill, delivery window, and risk state", "trade.status": "Status", "trade.product": "Product", "trade.delivery": "Delivery", "trade.quantity": "Capacity", "trade.price": "Limit", "trade.fill": "Filled",
+    "trade.autopilot": "Trading autopilot", "trade.autopilotDesc": "Forecast, risk, bid, and site dispatch closure", "trade.settlements": "Settlement evidence", "trade.settlementsDesc": "Meter baseline, imbalance, penalties, and evidence root hash",
   },
 };
 
@@ -129,18 +141,31 @@ function toggleLang() {
   state.lang = state.lang === "zh" ? "en" : "zh";
   localStorage.setItem("lang", state.lang);
   applyLang();
-  if (state.overview) { renderOverview(); renderStation(); renderDispatch(); renderRoi(); renderVpp(); renderRevenueProof(); }
+  if (state.overview) { renderOverview(); renderStation(); renderDispatch(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
 }
 
-async function api(path) {
-  const response = await fetch(path);
-  if (!response.ok) throw new Error(`API ${path} failed`);
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const response = await fetch(path, { ...options, headers });
+  if (response.status === 401) {
+    const error = new Error("authentication_required");
+    error.code = 401;
+    throw error;
+  }
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(detail.detail || `API ${path} failed`);
+  }
   return response.json();
 }
 
 async function loadAll() {
-  state.overview = await api("/api/overview");
-  state.revenueDiagnostics = await api("/api/revenue-diagnostics");
+  [state.overview, state.revenueDiagnostics] = await Promise.all([
+    api("/api/overview"), api("/api/revenue-diagnostics"),
+  ]);
+  state.trading = await api("/api/vpp/trading/dashboard").catch(() => null);
   if (!state.selectedStationId) state.selectedStationId = state.overview.stations[0].id;
   state.stationDetail = await api(`/api/stations/${state.selectedStationId}`);
   renderOverview();
@@ -149,6 +174,7 @@ async function loadAll() {
   renderRoi();
   renderVpp();
   renderRevenueProof();
+  renderTrading();
 }
 
 function renderOverview() {
@@ -366,6 +392,50 @@ function renderVpp() {
   `).join("");
 }
 
+function renderTrading() {
+  const trading = state.trading;
+  if (!trading) {
+    $("tMarket").textContent = "--";
+    $("tradeOrderRows").innerHTML = `<tr><td colspan="6">${state.lang === "zh" ? "交易数据库尚未配置" : "Trading database is not configured"}</td></tr>`;
+    $("automationRuns").innerHTML = "";
+    $("settlementRows").innerHTML = "";
+    return;
+  }
+  $("tMarket").textContent = trading.connection.market_code;
+  $("tMode").textContent = `${trading.connection.mode} · ${trading.connection.participant_id}`;
+  $("tOpenOrders").textContent = trading.metrics.open_orders;
+  $("tFilled").textContent = number(trading.metrics.filled_kw_24h, 1);
+  $("tBreaker").textContent = trading.circuit_breaker.state;
+  $("tBreaker").className = trading.circuit_breaker.state === "closed" ? "ok-text" : "danger-text";
+  $("tBreakerReason").textContent = trading.circuit_breaker.reason || (state.lang === "zh" ? "运行正常" : "Operating normally");
+  $("tPolicy").textContent = `${trading.risk_policy.name} · v${trading.risk_policy.version}`;
+  $("tradeOrderRows").innerHTML = trading.orders.length ? trading.orders.map((order) => `
+    <tr>
+      <td><span class="tag order-${order.status}">${order.status}</span></td>
+      <td>${order.product}</td>
+      <td>${new Date(order.delivery_start).toLocaleString()}</td>
+      <td>${number(order.quantity_kw, 1)} kW</td>
+      <td>${number(order.limit_price_per_kwh, 3)}</td>
+      <td>${number(order.filled_quantity_kw, 1)} kW</td>
+    </tr>
+  `).join("") : `<tr><td colspan="6">${state.lang === "zh" ? "暂无订单" : "No orders"}</td></tr>`;
+  $("automationRuns").innerHTML = trading.automation_runs.length ? trading.automation_runs.map((run) => `
+    <div class="event">
+      <strong>${run.status} · ${new Date(run.started_at).toLocaleString()}</strong>
+      <p>${run.trigger_source} · ${run.orders_created} ${state.lang === "zh" ? "笔订单" : "orders"}</p>
+      <small>${run.error || `${run.tasks_created} ${state.lang === "zh" ? "个场站任务" : "site tasks"}`}</small>
+    </div>
+  `).join("") : `<p>${state.lang === "zh" ? "等待首个自动交易周期" : "Waiting for the first automation cycle"}</p>`;
+  $("settlementRows").innerHTML = trading.settlements.length ? trading.settlements.map((batch) => `
+    <div class="dispatch-card">
+      <strong>${batch.market_code} · ${batch.status}</strong>
+      <p>${new Date(batch.period_start).toLocaleDateString()} · ${state.lang === "zh" ? "净收益" : "net"} ${money(batch.net_revenue)} CNY</p>
+      <div class="dispatch-meta"><span class="tag">${state.lang === "zh" ? "毛收入" : "gross"} ${money(batch.gross_revenue)}</span><span class="tag">${state.lang === "zh" ? "偏差" : "imbalance"} ${money(batch.imbalance_cost)}</span><span class="tag">${state.lang === "zh" ? "罚金" : "penalty"} ${money(batch.penalties)}</span></div>
+      <small class="hash-text">${batch.evidence_root_hash}</small>
+    </div>
+  `).join("") : `<p>${state.lang === "zh" ? "暂无结算批次" : "No settlement batches"}</p>`;
+}
+
 function drawLineChart(container, rows, series) {
   const width = container.clientWidth || 720;
   const height = container.clientHeight || 280;
@@ -398,6 +468,28 @@ applyLang();
 document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => setView(item.dataset.view)));
 $("langToggle").addEventListener("click", toggleLang);
 $("refreshButton").addEventListener("click", loadAll);
+$("logoutButton").addEventListener("click", () => {
+  sessionStorage.removeItem("chargeoptToken");
+  state.token = null;
+  $("loginScreen").hidden = false;
+});
+$("loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("loginError").textContent = "";
+  try {
+    const result = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("loginEmail").value, password: $("loginPassword").value }),
+    });
+    state.token = result.access_token;
+    sessionStorage.setItem("chargeoptToken", state.token);
+    $("loginPassword").value = "";
+    $("loginScreen").hidden = true;
+    await loadAll();
+  } catch (error) {
+    $("loginError").textContent = state.lang === "zh" ? "登录失败，请检查账号和密码。" : "Sign in failed. Check your credentials.";
+  }
+});
 $("stationSelect").addEventListener("change", async (event) => {
   state.selectedStationId = event.target.value;
   state.stationDetail = await api(`/api/stations/${state.selectedStationId}`);
@@ -417,7 +509,17 @@ window.addEventListener("resize", () => {
   }
 });
 
-loadAll().catch((error) => {
-  const msg = state.lang === "zh" ? "ChargeOpt OS 加载失败" : "ChargeOpt OS failed to load";
-  document.body.innerHTML = `<main class="workspace"><section class="panel"><h1>${msg}</h1><p>${error.message}</p></section></main>`;
-});
+async function bootstrap() {
+  try {
+    await loadAll();
+  } catch (error) {
+    if (error.code === 401) {
+      $("loginScreen").hidden = false;
+      return;
+    }
+    const msg = state.lang === "zh" ? "ChargeOpt OS 加载失败" : "ChargeOpt OS failed to load";
+    $("tenantLine").textContent = `${msg}: ${error.message}`;
+  }
+}
+
+bootstrap();

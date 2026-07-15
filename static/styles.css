@@ -25,6 +25,58 @@ body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+.login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #eef2f7;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 20px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.login-panel label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.login-brand span {
+  color: var(--muted);
+}
+
+.primary-button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--blue);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.form-error {
+  min-height: 20px;
+  color: var(--red);
+  font-size: 13px;
+}
+
 button,
 input,
 select {
@@ -454,6 +506,33 @@ tr.station-row:hover {
   color: #166534;
 }
 
+.tag.order-filled,
+.tag.order-submitted,
+.tag.order-partially_filled {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.tag.order-failed,
+.tag.order-rejected,
+.tag.order-risk_rejected {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.ok-text {
+  color: var(--green);
+}
+
+.danger-text {
+  color: var(--red);
+}
+
+.hash-text {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .controls {
   display: grid;
   gap: 12px;
@@ -505,7 +584,7 @@ tr.station-row:hover {
   }
 
   .nav {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
   }
 
   .nav-item {

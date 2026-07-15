@@ -1,6 +1,6 @@
 # ChargeOpt OS
 
-ChargeOpt OS is a production-grade Enterprise platform for ultra-fast charging, PV-storage-charging stations, fleet depots, and VPP aggregation workflows.
+ChargeOpt OS is a production-grade control plane for ultra-fast charging, PV-storage-charging stations, fleet depots, and unattended VPP aggregation trading.
 
 **Stack:** FastAPI · uvicorn · psycopg3 · PostgreSQL · pydantic-settings · structlog · Prometheus · Docker · GitHub Actions · Vercel
 
@@ -13,6 +13,10 @@ ChargeOpt OS is a production-grade Enterprise platform for ultra-fast charging, 
 - Storage ROI simulator (NPV, IRR, payback)
 - Revenue diagnostics that compare actual operation with a counterfactual no-EMS baseline and prove monthly profit lift
 - VPP resource aggregation and demand-response decomposition
+- Calibrated P10/P50/P90 flexibility forecasts and risk-constrained portfolio bid blocks
+- Idempotent signed market submission, immutable hash-chained order events, fills, cancellation states, and delivery schedules
+- Automated trade-to-site dispatch, interval meter evidence, imbalance settlement, and finance evidence roots
+- Five-minute Vercel Cron autopilot with policy gates, duplicate-cycle protection, circuit breaking, and failure compensation
 - Auditable dispatch recommendation records
 - Login sessions, RBAC permissions, tenant-scoped repository reads, and Postgres RLS policy foundations
 - OCPP / Modbus / MQTT gateway message normalization and protocol message ledger
@@ -76,6 +80,12 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 | `EDGE_GATEWAY_URL` | _(blank)_ | Edge gateway execution endpoint used by `chargeopt-worker` |
 | `EDGE_GATEWAY_TOKEN` | _(blank)_ | Optional bearer token for the edge gateway |
 | `WORKER_POLL_INTERVAL_SECONDS` | `5` | Poll interval for the long-running worker |
+| `CRON_SECRET` | _(blank)_ | Bearer secret used by Vercel Cron; required for unattended cycles |
+| `MARKET_WEBHOOK_SECRET` | _(blank)_ | HMAC secret for signed trade-fill callbacks |
+| `VPP_AUTOMATION_ENABLED` | `false` | Enables scheduled portfolio forecasting and bidding |
+| `VPP_MAX_ORDERS_PER_CYCLE` | `8` | Hard cap on new orders created per tenant and cycle |
+| `<CREDENTIAL_REF>_TOKEN` | _(blank)_ | Live market gateway token resolved from a connection row |
+| `<CREDENTIAL_REF>_SIGNING_SECRET` | _(blank)_ | Independent HMAC key for outbound market orders |
 
 ## Database Migrations
 
@@ -94,6 +104,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `004_industrial_control_plane.sql` – users/sessions/RBAC, tenant RLS policies, protocol devices/messages, task queue, dispatch approvals, edge receipts, optimization runs, and VPP settlements
 - `005_operational_closure.sql` – task worker leases/retries/timeout diagnostics and persisted revenue-proof evidence snapshots
 - `006_force_rls.sql` – FORCE ROW LEVEL SECURITY on tenant-scoped operational tables, including task, receipt, optimization, settlement, and proof ledgers
+- `007_vpp_trading_platform.sql` – market connections, versioned risk policy, probabilistic forecasts, orders/events/trades, delivery schedules, interval meters, settlement batches, circuit breakers, automation runs, outbox, immutable audit trigger, and forced tenant RLS
 
 ## Test
 
@@ -126,6 +137,7 @@ GET /api/v1/stations
 GET /api/v1/stations/{station_id}
 GET /api/v1/dispatch
 GET /api/v1/vpp
+GET /api/v1/vpp/trading/dashboard
 GET /api/v1/roi?capacity_kwh=1200&power_kw=600&capex_per_kwh=1150&vpp=true
 GET /api/v1/revenue-diagnostics?station_id=st-hq-hongqiao
 GET /api/v1/audit?limit=50&offset=0
@@ -144,6 +156,13 @@ POST /api/v1/dispatch/recommendations/{id}/reject
 POST /api/v1/edge/receipts
 POST /api/v1/optimization/runs
 POST /api/v1/vpp/settlements
+POST /api/v1/vpp/trading/automation/run
+POST /api/v1/vpp/trading/trades
+POST /api/v1/vpp/trading/market-webhook
+POST /api/v1/vpp/trading/meter-intervals
+POST /api/v1/vpp/trading/settlement-batches
+POST /api/v1/vpp/trading/circuit-breaker
+GET  /api/cron/vpp-cycle
 ```
 
 Error responses conform to **RFC 7807** (`application/problem+json`).  
@@ -171,6 +190,8 @@ GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 - GitHub Actions runs `python scripts/migrate.py` before production deployment so Neon tables are created/updated automatically on `main` pushes.
 - Set `DATABASE_URL` in both Vercel Production environment variables and GitHub Actions secrets. Vercel uses it at runtime; GitHub Actions uses it to apply migrations before deployment.
 - Set `API_KEY` in production for machine-to-machine access, or use `/api/v1/auth/login` for human/operator access.
+- Set `CRON_SECRET` and `VPP_AUTOMATION_ENABLED=true` to activate the five-minute production cycle. Vercel Cron sends `Authorization: Bearer $CRON_SECRET` automatically.
+- Keep a connection in `sandbox` mode for certification drills. For live mode, set its `base_url`, `credential_ref`, venue participant ID, and the matching token/signing-secret environment variables.
 - Field equipment must connect through an authenticated gateway that posts OCPP/Modbus/MQTT-normalized payloads to `/api/v1/protocols/{protocol}/messages`; direct charger control remains gated by approval + task queue + edge receipt.
 
 Production URL: **https://chargeopt-os.vercel.app**
@@ -192,6 +213,14 @@ The moat metric is not "the algorithm exists"; it is whether ChargeOpt can repea
 `POST /api/v1/revenue-diagnostics/runs` persists the same proof payload to PostgreSQL as an auditable evidence snapshot. This is the monthly customer-business-review artifact that turns the product claim into a ledgered ROI case.
 
 The optimizer used by `/api/v1/optimization/runs` is `risk-constrained-mpc-milp-dp-v2`: a serverless-safe rolling-horizon dynamic program over discrete charge/discharge actions. It enforces SOC, transformer, ramp, VPP reserve, degradation, and service-pressure constraints without requiring a heavy commercial solver in Vercel.
+
+## Unattended VPP Trading
+
+Every five-minute cycle has one durable `tenant_id + cycle_key`, so retries cannot double-submit. The autopilot builds a calibrated portfolio forecast, derives conservative sell blocks from P10 flexibility, evaluates the active versioned risk policy, writes an idempotent order, and submits it through either the deterministic sandbox venue or a signed REST market gateway.
+
+Market fills are accepted only through authenticated operator APIs or a timestamped HMAC webhook. A fill atomically creates station delivery schedules and leased `dispatch.execute` tasks. The edge worker records equipment receipts; a failed or rolled-back VPP command opens the global tenant breaker and blocks new orders. Interval meter evidence then produces trade-level performance, imbalance costs, penalties, net revenue, and a batch evidence root hash.
+
+The system fails closed when telemetry is stale, forecast confidence is below policy, order/daily limits are exceeded, the breaker is open, a state transition is illegal, credentials are missing, or webhook signatures are invalid.
 
 ## Execution Closure
 
@@ -220,8 +249,9 @@ Low-level APIs remain available for custom workers:
 
 Expired worker leases can be requeued or failed with `POST /api/v1/tasks/reap-expired`. Each state transition writes audit evidence.
 
-## Operational Caveats
+## Deployment Boundaries
 
 - The protocol layer is an authenticated gateway API, not a direct vendor cloud connector. Site-specific OCPP brokers, Modbus TCP polling, and MQTT credentials must be configured outside the repository and forward signed payloads into the API.
-- The optimizer is dependency-free and serverless-safe. It is a MILP/MPC-style dynamic-programming approximation, not a commercial solver integration.
+- The market adapter is a hardened gateway contract, not a claim of certification for every provincial/grid venue. Each launch still requires venue-specific protocol mapping, certificates, participant onboarding, sandbox conformance, and regulatory acceptance.
+- The optimizer is dependency-free and serverless-safe. Station dispatch is a discrete rolling MPC search; portfolio bids use quantile/CVaR-style risk reserves. Replace the implementation behind the same persisted evidence contract when a licensed commercial solver is required by a customer or regulator.
 - GitHub Actions cannot create `DATABASE_URL` automatically without repository secret permissions. Add `DATABASE_URL` under GitHub repository secrets before relying on push-to-production migrations.

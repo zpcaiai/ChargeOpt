@@ -5,9 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ChargeOpt OS</title>
     <meta name="description" content="ChargeOpt OS – Energy Dispatch Operations" />
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
+    <div id="loginScreen" class="login-screen" hidden>
+      <form id="loginForm" class="login-panel">
+        <div class="brand login-brand"><span class="brand-mark">CO</span><div><strong>ChargeOpt OS</strong><span>VPP Trading Control</span></div></div>
+        <div><h1 data-i18n="login.title">安全登录</h1><p data-i18n="login.desc">使用租户运营账号进入自动交易控制台</p></div>
+        <label><span data-i18n="login.email">邮箱</span><input id="loginEmail" type="email" autocomplete="username" required /></label>
+        <label><span data-i18n="login.password">密码</span><input id="loginPassword" type="password" autocomplete="current-password" minlength="8" required /></label>
+        <p id="loginError" class="form-error" role="alert"></p>
+        <button class="primary-button" type="submit" data-i18n="login.submit">登录</button>
+      </form>
+    </div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -23,6 +34,7 @@
           <button class="nav-item" data-view="dispatch" data-i18n-title="nav.dispatch.title"><span>⇄</span><b data-i18n="nav.dispatch">调度</b></button>
           <button class="nav-item" data-view="roi" data-i18n-title="nav.roi.title"><span>◍</span><b data-i18n="nav.roi">ROI</b></button>
           <button class="nav-item" data-view="vpp" data-i18n-title="nav.vpp.title"><span>◇</span><b data-i18n="nav.vpp">VPP</b></button>
+          <button class="nav-item" data-view="trading" data-i18n-title="nav.trading.title"><span>¥</span><b data-i18n="nav.trading">交易</b></button>
         </nav>
         <div class="mode-panel">
           <span data-i18n="mode.label">控制模式</span>
@@ -41,6 +53,7 @@
             <select id="stationSelect" aria-label="Select station"></select>
             <button id="langToggle" class="icon-button lang-toggle" title="Switch language">EN</button>
             <button id="refreshButton" class="icon-button" data-i18n-title="btn.refresh">↻</button>
+            <button id="logoutButton" class="icon-button" data-i18n-title="btn.logout">⇥</button>
           </div>
         </header>
 
@@ -196,6 +209,29 @@
               <div id="vppResources" class="event-list"></div>
             </section>
           </div>
+        </section>
+
+        <section id="trading" class="view">
+          <div class="metric-grid compact">
+            <article class="metric"><span data-i18n="trade.market">交易市场</span><strong id="tMarket">--</strong><small id="tMode">--</small></article>
+            <article class="metric"><span data-i18n="trade.openOrders">未结订单</span><strong id="tOpenOrders">--</strong><small data-i18n="trade.orders">笔</small></article>
+            <article class="metric"><span data-i18n="trade.filled">24h 成交</span><strong id="tFilled">--</strong><small>kW</small></article>
+            <article class="metric"><span data-i18n="trade.breaker">熔断器</span><strong id="tBreaker">--</strong><small id="tBreakerReason">--</small></article>
+          </div>
+          <div class="layout two-one">
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="trade.ordersTitle">市场订单</h2><p data-i18n="trade.ordersDesc">报价、成交、交付窗口和风险状态</p></div><span id="tPolicy" class="status-pill">--</span></div>
+              <div class="table-wrap"><table><thead><tr><th data-i18n="trade.status">状态</th><th data-i18n="trade.product">产品</th><th data-i18n="trade.delivery">交付</th><th data-i18n="trade.quantity">容量</th><th data-i18n="trade.price">限价</th><th data-i18n="trade.fill">成交</th></tr></thead><tbody id="tradeOrderRows"></tbody></table></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="trade.autopilot">自动交易</h2><p data-i18n="trade.autopilotDesc">预测、风控、报价与场站调度闭环</p></div></div>
+              <div id="automationRuns" class="event-list"></div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-head"><div><h2 data-i18n="trade.settlements">结算与证据</h2><p data-i18n="trade.settlementsDesc">计量基线、偏差费用、罚金和证据根哈希</p></div></div>
+            <div id="settlementRows" class="dispatch-list"></div>
+          </section>
         </section>
       </main>
     </div>

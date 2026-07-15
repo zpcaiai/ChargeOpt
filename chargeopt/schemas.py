@@ -521,6 +521,104 @@ class VppSettlementResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Automated VPP trading
+# ---------------------------------------------------------------------------
+
+
+class VppAutomationRunRequest(BaseModel):
+    trigger_source: str = Field(default="operator", min_length=2, max_length=80)
+
+
+class VppAutomationRunResponse(BaseModel):
+    tenant_id: str
+    cycle_key: str | None = None
+    status: str
+    orders_created: int = 0
+    model_config = {"extra": "allow"}
+
+
+class MarketTradeWebhookRequest(BaseModel):
+    order_id: str = Field(min_length=3, max_length=120)
+    market_trade_id: str = Field(min_length=3, max_length=240)
+    quantity_kw: float = Field(gt=0)
+    price_per_kwh: float = Field(ge=0)
+    traded_at: datetime
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketTradeResponse(BaseModel):
+    id: str
+    order_id: str
+    status: str | None = None
+    tasks_created: int
+    duplicate: bool = False
+
+
+class VppMeterIntervalRequest(BaseModel):
+    station_id: str
+    interval_start: datetime
+    interval_end: datetime
+    baseline_kw: float = Field(ge=0)
+    actual_grid_kw: float = Field(ge=0)
+    quality: Literal["measured", "estimated", "substituted", "invalid"] = "measured"
+    source: str = Field(min_length=2, max_length=120)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class VppMeterIntervalResponse(BaseModel):
+    id: str
+    delivered_kw: float
+    evidence_hash: str
+    quality: str
+
+
+class VppSettlementBatchRequest(BaseModel):
+    market_code: str = Field(min_length=2, max_length=80)
+    period_start: datetime
+    period_end: datetime
+    imbalance_price_per_kwh: float = Field(default=0.8, ge=0)
+    penalty_rate: float = Field(default=0.25, ge=0, le=5)
+
+
+class VppSettlementBatchResponse(BaseModel):
+    id: str
+    status: str
+    trade_count: int
+    gross_revenue: float
+    imbalance_cost: float
+    penalties: float
+    net_revenue: float
+    evidence_root_hash: str
+
+
+class CircuitBreakerRequest(BaseModel):
+    state: Literal["closed", "open", "half_open"]
+    reason: str = Field(min_length=3, max_length=1000)
+    reset_after: datetime | None = None
+
+
+class CircuitBreakerResponse(BaseModel):
+    state: str
+    reason: str | None
+    failure_count: int
+    opened_at: datetime | None = None
+    reset_after: datetime | None = None
+    updated_by: str
+    updated_at: datetime
+
+
+class VppTradingDashboardResponse(BaseModel):
+    generated_at: datetime
+    connection: dict[str, Any]
+    risk_policy: dict[str, Any]
+    circuit_breaker: dict[str, Any]
+    metrics: dict[str, Any]
+    orders: list[dict[str, Any]]
+    automation_runs: list[dict[str, Any]]
+    settlements: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
