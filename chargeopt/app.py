@@ -29,6 +29,19 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from .advanced_ems import (
+    ALGORITHMS as EMS_ALGORITHMS,
+)
+from .advanced_ems import (
+    FoundationForecastClient,
+    calibrated_ensemble_forecast,
+    coordinate_portfolio_admm,
+    evaluate_offline_policy,
+    project_three_phase_distflow,
+    solve_distributionally_robust_mpc,
+    train_conservative_fitted_q,
+)
+from .advanced_ems_repository import list_ems_evidence, persist_ems_evidence
 from .analytics import build_dispatch, build_overview, build_vpp, simulate_roi, station_detail, station_summary
 from .auth import ROLE_PERMISSIONS, Principal, development_principal, has_permission, static_api_key_principal
 from .config import get_settings
@@ -105,6 +118,12 @@ from .schemas import (
     DispatchStatusResponse,
     EdgeReceiptRequest,
     EdgeReceiptResponse,
+    EmsCoordinationRequest,
+    EmsDispatchRequest,
+    EmsForecastRequest,
+    EmsNetworkProjectionRequest,
+    EmsOfflinePolicyRequest,
+    EmsResponse,
     HealthResponse,
     LoginRequest,
     LoginResponse,
@@ -448,6 +467,8 @@ ModelApproveDep = Depends(require_write_permission("model:approve"))
 TwinReadDep = Depends(require_permission("twin:read"))
 TwinWriteDep = Depends(require_write_permission("twin:write"))
 TwinApproveDep = Depends(require_write_permission("twin:approve"))
+EmsReadDep = Depends(require_permission("ems:read"))
+EmsWriteDep = Depends(require_write_permission("ems:write"))
 AuditReadDep = Depends(require_permission("audit:read"))
 
 
@@ -589,6 +610,62 @@ def _register_ops_routes(app: FastAPI, s: Any) -> None:
 def _build_v1_router(s: Any) -> APIRouter:
     router = APIRouter(tags=["v1"])
     rl = f"{s.rate_limit_per_minute}/minute"
+
+    def _ems_target_tenant(principal: Principal, requested: str | None = None) -> str:
+        tenant_id = requested or principal.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="tenant_id is required for a platform-wide principal.",
+            )
+        if not principal.is_platform_admin and tenant_id != principal.tenant_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant EMS access is denied.")
+        return tenant_id
+
+    def _ems_station(repo: Any, station_id: str) -> Any:
+        station = next((item for item in repo.stations if item.id == station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {station_id}")
+        return station
+
+    def _ems_result_with_evidence(
+        principal: Principal,
+        tenant_id: str,
+        station_id: str | None,
+        evidence_type: str,
+        evidence_class: str,
+        request_payload: dict[str, Any],
+        result: dict[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if not s.use_db:
+            return {
+                **result,
+                "evidence": {"id": None, "persisted": False, "replayed": False, "reason": "database_disabled"},
+            }
+        stored = persist_ems_evidence(
+            tenant_id,
+            station_id,
+            evidence_type,
+            result["algorithm"],
+            evidence_class,
+            result["input_hash"],
+            request_payload,
+            result,
+            idempotency_key,
+            principal.subject,
+            _tenant_scope(principal),
+        )
+        persisted_result = stored["result"] if stored["replayed"] else result
+        return {
+            **persisted_result,
+            "evidence": {
+                "id": stored["id"],
+                "persisted": True,
+                "replayed": stored["replayed"],
+                "created_at": stored.get("created_at"),
+            },
+        }
 
     @router.post("/auth/login", response_model=LoginResponse)
     @limiter.limit(rl)
@@ -1535,6 +1612,334 @@ def _build_v1_router(s: Any) -> APIRouter:
             scope_tenant_id=_tenant_scope(_auth),
         )
         return {"id": run_id, **result}
+
+    @router.get("/ems/capabilities", response_model=EmsResponse)
+    @limiter.limit(rl)
+    async def _ems_capabilities(request: Request, _auth: Principal = EmsReadDep) -> Any:
+        foundation_model_error = None
+        try:
+            foundation_model_configured = FoundationForecastClient.from_environment() is not None
+        except RuntimeError as exc:
+            foundation_model_configured = False
+            foundation_model_error = str(exc)
+        return {
+            "algorithms": EMS_ALGORITHMS,
+            "foundation_model_configured": foundation_model_configured,
+            "foundation_model_configuration_valid": foundation_model_error is None,
+            "foundation_model_configuration_error": foundation_model_error,
+            "persistence_enabled": s.use_db,
+            "control_mode": "recommendation_and_shadow_only",
+            "field_control_available": False,
+            "field_control_requirements": [
+                "approved dispatch recommendation",
+                "active digital-twin qualification",
+                "device command task",
+                "edge gateway receipt",
+            ],
+            "network_certificate_scope": "radial phase-decoupled LinDistFlow; external AC study required",
+        }
+
+    @router.get("/ems/evidence", response_model=EmsResponse)
+    @limiter.limit(rl)
+    async def _ems_evidence(
+        request: Request,
+        tenant_id: str | None = Query(default=None),
+        evidence_type: str | None = Query(default=None),
+        station_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=1000),
+        _auth: Principal = EmsReadDep,
+    ) -> Any:
+        target_tenant = _ems_target_tenant(_auth, tenant_id)
+        supported_evidence_types = {
+            "forecast",
+            "dispatch",
+            "network_projection",
+            "portfolio_coordination",
+            "offline_policy_evaluation",
+        }
+        if evidence_type is not None and evidence_type not in supported_evidence_types:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Unsupported EMS evidence_type.",
+            )
+        if not s.use_db:
+            return {"runs": [], "persistence_enabled": False}
+        try:
+            runs = list_ems_evidence(
+                target_tenant,
+                evidence_type=evidence_type,
+                station_id=station_id,
+                limit=limit,
+                scope_tenant_id=_tenant_scope(_auth),
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        return {"runs": runs, "persistence_enabled": True}
+
+    @router.post("/ems/forecasts", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit("20/minute")
+    async def _ems_forecast(
+        request: Request,
+        body: EmsForecastRequest,
+        _auth: Principal = EmsWriteDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = _ems_station(repo, body.station_id)
+        points = sorted(repo.station_points(station.id), key=lambda item: item.timestamp)
+        history = body.history_kw or [float(point.grid_kw) for point in points]
+        evidence_class = "replay" if body.history_kw is not None else "observed" if s.use_db else "synthetic"
+        external_predictions = None
+        external_metadata = None
+        if body.use_foundation_model:
+            try:
+                client = FoundationForecastClient.from_environment()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+            if client is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="The time-series foundation model is not configured.",
+                )
+            try:
+                external = client.forecast(history, body.horizon, body.interval_minutes)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+            external_predictions = {external["name"]: external["p50"]}
+            external_metadata = {external["name"]: {"model_version": external["model_version"]}}
+        try:
+            result = calibrated_ensemble_forecast(
+                history,
+                horizon=body.horizon,
+                interval_minutes=body.interval_minutes,
+                coverage=body.coverage,
+                scenario_count=body.scenario_count,
+                seed=body.random_seed,
+                external_predictions=external_predictions,
+                external_metadata=external_metadata,
+                evidence_class=evidence_class,
+            )
+            return _ems_result_with_evidence(
+                _auth,
+                station.tenant_id,
+                station.id,
+                "forecast",
+                evidence_class,
+                body.model_dump(),
+                result,
+                body.idempotency_key,
+            )
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    @router.post("/ems/dispatch-runs", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit("12/minute")
+    async def _ems_dispatch(
+        request: Request,
+        body: EmsDispatchRequest,
+        _auth: Principal = EmsWriteDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = _ems_station(repo, body.station_id)
+        points = sorted(repo.station_points(station.id), key=lambda item: item.timestamp)
+        if not points and body.history_kw is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Station telemetry history is empty.")
+        history = body.history_kw or [float(point.grid_kw) for point in points]
+        evidence_class = "replay" if body.history_kw is not None else "observed" if s.use_db else "synthetic"
+        external_predictions = None
+        external_metadata = None
+        if body.use_foundation_model:
+            try:
+                client = FoundationForecastClient.from_environment()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+            if client is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="The time-series foundation model is not configured.",
+                )
+            try:
+                external = client.forecast(history, body.horizon, body.interval_minutes)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+            external_predictions = {external["name"]: external["p50"]}
+            external_metadata = {external["name"]: {"model_version": external["model_version"]}}
+        try:
+            forecast = calibrated_ensemble_forecast(
+                history,
+                horizon=body.horizon,
+                interval_minutes=body.interval_minutes,
+                coverage=body.coverage,
+                scenario_count=body.scenario_count,
+                seed=body.random_seed,
+                external_predictions=external_predictions,
+                external_metadata=external_metadata,
+                evidence_class=evidence_class,
+            )
+            tariff = repo.tariff_for(station)
+            prices = body.prices or [
+                float(tariff.price_at(datetime.fromisoformat(row["at"]).hour)) for row in forecast["rows"]
+            ]
+            initial_soc = body.initial_soc if body.initial_soc is not None else float(points[-1].storage_soc)
+            demand_charge = (
+                body.demand_charge_per_kw
+                if body.demand_charge_per_kw is not None
+                else float(tariff.demand_charge_per_kw_month) / 30
+            )
+            result = solve_distributionally_robust_mpc(
+                station,
+                forecast,
+                prices=prices,
+                initial_soc=initial_soc,
+                soh=body.soh,
+                temperature_c=body.temperature_c,
+                risk_alpha=body.risk_alpha,
+                risk_weight=body.risk_weight,
+                demand_charge_per_kw=demand_charge,
+                reserve_soc=body.reserve_soc,
+            )
+            result["evidence_class"] = evidence_class
+            result["forecast_evidence"] = forecast
+            return _ems_result_with_evidence(
+                _auth,
+                station.tenant_id,
+                station.id,
+                "dispatch",
+                evidence_class,
+                body.model_dump(),
+                result,
+                body.idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post("/ems/network-projections", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit("20/minute")
+    async def _ems_network_projection(
+        request: Request,
+        body: EmsNetworkProjectionRequest,
+        _auth: Principal = EmsWriteDep,
+    ) -> Any:
+        target_tenant = _ems_target_tenant(_auth, body.tenant_id)
+        repo = load_repository_from_db(target_tenant)
+        station_ids = {station.id for station in repo.stations}
+        proposal_ids = {str(item.get("station_id")) for item in body.proposals}
+        if body.station_id is not None and body.station_id not in station_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown tenant station_id: {body.station_id}",
+            )
+        if not proposal_ids <= station_ids:
+            unknown = sorted(proposal_ids - station_ids)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown tenant station_ids: {', '.join(unknown)}",
+            )
+        try:
+            result = project_three_phase_distflow(body.network, body.proposals)
+            result["evidence_class"] = body.evidence_class
+            return _ems_result_with_evidence(
+                _auth,
+                target_tenant,
+                body.station_id,
+                "network_projection",
+                body.evidence_class,
+                body.model_dump(),
+                result,
+                body.idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post("/ems/portfolio-coordination", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit("20/minute")
+    async def _ems_portfolio_coordination(
+        request: Request,
+        body: EmsCoordinationRequest,
+        _auth: Principal = EmsWriteDep,
+    ) -> Any:
+        target_tenant = _ems_target_tenant(_auth, body.tenant_id)
+        repo = load_repository_from_db(target_tenant)
+        station_ids = {station.id for station in repo.stations}
+        resource_ids = {str(item.get("station_id")) for item in body.resources}
+        if not resource_ids <= station_ids:
+            unknown = sorted(resource_ids - station_ids)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown tenant station_ids: {', '.join(unknown)}",
+            )
+        try:
+            result = coordinate_portfolio_admm(
+                body.resources,
+                body.target_kw,
+                rho=body.rho,
+                tolerance=body.tolerance,
+                max_iterations=body.max_iterations,
+            )
+            result["evidence_class"] = "replay"
+            result["execution_authorized"] = False
+            result["control_boundary"] = "allocation recommendation only"
+            return _ems_result_with_evidence(
+                _auth,
+                target_tenant,
+                None,
+                "portfolio_coordination",
+                "replay",
+                body.model_dump(),
+                result,
+                body.idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post("/ems/offline-policy/evaluations", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit("6/minute")
+    async def _ems_offline_policy(
+        request: Request,
+        body: EmsOfflinePolicyRequest,
+        _auth: Principal = EmsWriteDep,
+    ) -> Any:
+        target_tenant = _ems_target_tenant(_auth, body.tenant_id)
+        if body.station_id is not None:
+            repo = load_repository_from_db(target_tenant)
+            _ems_station(repo, body.station_id)
+        try:
+            model = train_conservative_fitted_q(
+                body.transitions,
+                body.actions_kw,
+                conservative_penalty=body.conservative_penalty,
+            )
+            evaluation = evaluate_offline_policy(
+                model,
+                body.evaluation_state,
+                body.safety_constraints,
+                max_mahalanobis=body.max_mahalanobis,
+            )
+            result = {
+                **evaluation,
+                "algorithm": model["algorithm"],
+                "input_hash": evaluation["input_hash"],
+                "evidence_class": "shadow",
+                "model": model,
+                "execution_authorized": False,
+            }
+            return _ems_result_with_evidence(
+                _auth,
+                target_tenant,
+                body.station_id,
+                "offline_policy_evaluation",
+                "shadow",
+                body.model_dump(),
+                result,
+                body.idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     @router.get("/models", response_model=list[ModelResponse])
     @limiter.limit(rl)

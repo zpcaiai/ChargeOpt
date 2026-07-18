@@ -38,7 +38,7 @@ def test_probabilistic_forecast_and_bid_optimizer_respect_capacity():
     repo = load_repository()
     now = max(point.timestamp for point in repo.telemetry).astimezone(UTC)
     forecast = probabilistic_portfolio_forecast(repo, "t-001", horizon_hours=4, now=now)
-    assert forecast["algorithm"] == "conformal-seasonal-ensemble-v1"
+    assert forecast["algorithm"] == "adaptive-conformal-ensemble-v2"
     assert len(forecast["portfolio"]) == 16
     assert 0.5 <= forecast["calibration_score"] <= 0.99
     assert all(row["p10_grid_kw"] <= row["p50_grid_kw"] <= row["p90_grid_kw"] for row in forecast["portfolio"])
@@ -49,6 +49,9 @@ def test_probabilistic_forecast_and_bid_optimizer_respect_capacity():
         assert bid["quantity_kw"] <= 5000
         assert sum(item["target_kw"] for item in bid["allocation"]) <= bid["quantity_kw"] + 0.01
         assert bid["limit_price_per_kwh"] >= 0.1
+        assert bid["cvar_shortfall_kw"] >= bid["var_shortfall_kw"]
+        assert bid["risk_scenario_count"] == forecast["scenario_count"]
+        assert bid["risk_algorithm"] == "empirical-capacity-shortfall-cvar-v1"
 
 
 def test_risk_engine_fails_closed_for_stale_data_and_breaker():

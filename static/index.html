@@ -209,6 +209,20 @@
               <div id="storagePlan" class="plan-list"></div>
             </section>
           </div>
+          <section class="panel ems-workspace">
+            <div class="panel-head">
+              <div><h2 data-i18n="ems.title">高级能源优化</h2><p data-i18n="ems.desc">概率预测、DRO-CVaR 调度与电池退化约束</p></div>
+              <span id="emsBoundary" class="status-pill">--</span>
+            </div>
+            <div id="emsAlgorithms" class="dispatch-meta ems-algorithms"></div>
+            <div class="controls ems-controls">
+              <label><span data-i18n="ems.horizon">滚动时域</span><select id="emsHorizon"><option value="6" selected>6 h</option><option value="12">12 h</option><option value="24">24 h</option><option value="48">48 h</option></select></label>
+              <label><span data-i18n="ems.risk">CVaR 置信度</span><select id="emsRisk"><option value="0.9">90%</option><option value="0.95" selected>95%</option><option value="0.975">97.5%</option></select></label>
+              <button id="emsRun" class="primary-button" type="button" data-i18n="ems.run">运行风险调度</button>
+            </div>
+            <div id="emsResult" class="ems-result" role="status"></div>
+            <div id="emsPlan" class="plan-list ems-plan"></div>
+          </section>
         </section>
 
         <section id="roi" class="view">

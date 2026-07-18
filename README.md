@@ -22,6 +22,9 @@ ChargeOpt OS is a production-grade control plane for ultra-fast charging, PV-sto
 - Deployable mTLS OCPP 1.6, TLS MQTT, and isolated-network Modbus TCP edge runtime with protocol ledger and command receipts
 - Async task queue with worker leases/retries, dispatch approval workflow, edge command receipts, and VPP settlement ledger
 - HiGHS mixed-integer rolling MPC with binary charge/discharge modes, physical constraints, and persisted solver evidence
+- Adaptive ensemble forecasting with split-conformal intervals, synchronized residual block scenarios, and optional external time-series foundation-model inference
+- Wasserstein-radius robust scenario MILP with explicit CVaR, battery SOH/temperature degradation cost, three-phase radial LinDistFlow projection, and bounded ADMM portfolio coordination
+- Conservative offline fitted-Q evaluation with Mahalanobis OOD rejection and hard physical action projection; learning outputs remain shadow-only
 - Model registry, quantile backtests, drift/quality gates, shadow promotion, and maker-checker model approval
 - Immutable settlement event chain with approval, dispute, export, payment, and reversal workflows
 - SLO incidents, 30-day immutable shadow qualification, dual-worker manifests, and scheduled Neon point-in-time restore drills
@@ -89,6 +92,9 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 | `VPP_AUTOMATION_ENABLED` | `false` | Enables scheduled portfolio forecasting and bidding |
 | `VPP_MAX_ORDERS_PER_CYCLE` | `8` | Hard cap on new orders created per tenant and cycle |
 | `CHARGEOPT_REQUIRE_EXACT_SOLVER` | production=`true` | Block dispatch if the HiGHS MILP solver is unavailable |
+| `CHARGEOPT_TSF_ENDPOINT` | _(blank)_ | Optional HTTPS endpoint for an externally hosted time-series foundation model |
+| `CHARGEOPT_TSF_TOKEN` | _(blank)_ | Bearer token paired with `CHARGEOPT_TSF_ENDPOINT`; partial configuration fails closed |
+| `CHARGEOPT_TSF_MODEL` | `chronos-2` | Model identifier sent to the external forecast adapter |
 | `<CREDENTIAL_REF>_TOKEN` | _(blank)_ | Live market gateway token resolved from a connection row |
 | `<CREDENTIAL_REF>_SIGNING_SECRET` | _(blank)_ | Independent HMAC key for outbound market orders |
 
@@ -118,6 +124,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `013_application_rls_role.sql` – non-owner `chargeopt_app` role with no RLS bypass; every runtime connection assumes this role
 - `014_ingress_receipt_idempotency.sql` – durable protocol-message and edge-receipt idempotency keys
 - `015_digital_twin.sql` – versioned asset graph, device historian, state estimates, model calibration, simulation/replay, diagnostics, maintenance actions, causal evidence, and field qualification
+- `016_advanced_ems.sql` – append-only advanced EMS evidence ledger with idempotency, audit linkage, fail-closed tenant RLS, and immutable forecast/dispatch/network/coordination/policy records
 
 ## Test
 
@@ -260,9 +267,21 @@ The deterministic simulator models battery energy, dynamic conversion efficiency
 
 The optimizer used by `/api/v1/optimization/runs` is `scipy-highs-milp-mpc-v1`. It solves binary charge/discharge exclusivity, SOC dynamics and bounds, transformer limits, ramp limits, demand peak, degradation, service pressure, and terminal VPP reserve as a mixed-integer program. Each run stores solver status, objective, MIP gap, and node count. Production fails closed when the exact solver is unavailable; the labeled discrete fallback is development-only.
 
+## Advanced EMS Optimization
+
+The `/api/v1/ems/*` surface adds replayable, risk-aware decision support without bypassing the dispatch approval plane:
+
+- `POST /ems/forecasts` fits seasonal, robust-trend, and Fourier-ridge members, weights them by holdout error, calibrates finite-sample intervals, and generates synchronized residual block scenarios. An optional HTTPS adapter can add a separately hosted time-series foundation model; model use is explicit per request and partial credentials fail closed.
+- `POST /ems/dispatch-runs` solves a shared, non-anticipative scenario MILP with Wasserstein uncertainty inflation, expected energy/demand cost, CVaR tail cost, SOC/ramp/transformer limits, terminal reserve, and SOH/temperature-aware battery degradation.
+- `POST /ems/network-projections` projects proposed station load through a radial, phase-decoupled LinDistFlow model with line, transformer, power-factor, and voltage limits. This result is deliberately marked `ac_certified=false`; a venue/site-specific AC study remains an external commissioning input.
+- `POST /ems/portfolio-coordination` uses bounded consensus ADMM to allocate a portfolio target while preserving local resource bounds and recording primal/dual convergence evidence.
+- `POST /ems/offline-policy/evaluations` trains conservative linear fitted-Q models only from safe transitions, rejects out-of-distribution states, and projects actions into hard physical bounds. These outputs are always `shadow_advisory_only` and never authorize field control.
+
+With PostgreSQL enabled, every run is written to the immutable `ems_evidence_runs` ledger with tenant RLS, an idempotency key, full algorithm version, evidence class, canonical input hash, request/result payloads, actor, and audit entry. Without PostgreSQL, responses are explicitly labeled transient and are not represented as persisted evidence.
+
 ## Unattended VPP Trading
 
-Every five-minute cycle has one durable `tenant_id + cycle_key`, so retries cannot double-submit. The autopilot builds a calibrated portfolio forecast, derives conservative sell blocks from P10 flexibility, evaluates the active versioned risk policy, and atomically writes both the order and its outbox event. Replicated workers publish with leased retries and idempotency keys, reconcile remote state, and open the breaker on dead letters or mismatches.
+Every five-minute cycle has one durable `tenant_id + cycle_key`, so retries cannot double-submit. The autopilot builds synchronized station scenarios, derives conservative sell blocks from P10 flexibility, records empirical delivery-shortfall VaR/CVaR, evaluates the active versioned risk policy, and atomically writes both the order and its outbox event. Replicated workers publish with leased retries and idempotency keys, reconcile remote state, and open the breaker on dead letters or mismatches.
 
 Market fills are accepted only through authenticated operator APIs or a timestamped HMAC webhook. A fill atomically creates station delivery schedules and leased `dispatch.execute` tasks. The edge worker records equipment receipts; a failed or rolled-back VPP command opens the global tenant breaker and blocks new orders. Interval meter evidence then produces trade-level performance, imbalance costs, penalties, net revenue, and a batch evidence root hash.
 

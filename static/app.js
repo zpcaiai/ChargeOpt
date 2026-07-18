@@ -5,6 +5,8 @@ const state = {
   stationDetail: null,
   twin: null,
   twinSimulation: null,
+  emsCapabilities: null,
+  emsDispatch: null,
   selectedStationId: null,
   lang: localStorage.getItem("lang") || "zh",
   token: sessionStorage.getItem("chargeoptToken"),
@@ -65,6 +67,7 @@ const TRANSLATIONS = {
     "twin.trajectory": "物理轨迹", "twin.trajectoryDesc": "负荷、光伏、储能与变压器约束的确定性仿真",
     "twin.scenario": "场景实验", "twin.scenarioDesc": "在隔离仿真中调整负荷和储能动作",
     "twin.loadMultiplier": "负荷倍率", "twin.storageCommand": "储能指令 kW", "twin.horizon": "仿真步数", "twin.run": "运行仿真",
+    "ems.title": "高级能源优化", "ems.desc": "概率预测、DRO-CVaR 调度与电池退化约束", "ems.horizon": "滚动时域", "ems.risk": "CVaR 置信度", "ems.run": "运行风险调度", "ems.recommendation": "仅建议", "ems.expected": "期望成本", "ems.var": "风险价值", "ems.cvar": "尾部风险", "ems.scenarios": "场景", "ems.persisted": "证据已固化", "ems.transient": "临时证据", "ems.running": "求解中", "ems.failed": "风险调度失败",
   },
   en: {
     "nav.cockpit": "Cockpit", "nav.cockpit.title": "Operating cockpit",
@@ -116,6 +119,7 @@ const TRANSLATIONS = {
     "twin.trajectory": "Physical trajectory", "twin.trajectoryDesc": "Deterministic load, PV, storage, and transformer simulation",
     "twin.scenario": "Scenario lab", "twin.scenarioDesc": "Adjust load and storage actions in an isolated simulation",
     "twin.loadMultiplier": "Load multiplier", "twin.storageCommand": "Storage command kW", "twin.horizon": "Simulation steps", "twin.run": "Run simulation",
+    "ems.title": "Advanced energy optimization", "ems.desc": "Probabilistic forecast, DRO-CVaR dispatch, and battery degradation constraints", "ems.horizon": "Rolling horizon", "ems.risk": "CVaR confidence", "ems.run": "Run risk dispatch", "ems.recommendation": "Recommendation only", "ems.expected": "Expected cost", "ems.var": "Value at risk", "ems.cvar": "Tail risk", "ems.scenarios": "Scenarios", "ems.persisted": "Evidence persisted", "ems.transient": "Transient evidence", "ems.running": "Solving", "ems.failed": "Risk dispatch failed",
   },
 };
 
@@ -157,7 +161,7 @@ function toggleLang() {
   state.lang = state.lang === "zh" ? "en" : "zh";
   localStorage.setItem("lang", state.lang);
   applyLang();
-  if (state.overview) { renderOverview(); renderStation(); renderTwin(); renderDispatch(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
+  if (state.overview) { renderOverview(); renderStation(); renderTwin(); renderDispatch(); renderEms(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
 }
 
 async function api(path, options = {}) {
@@ -182,16 +186,19 @@ async function loadAll() {
     api("/api/overview"), api("/api/revenue-diagnostics"),
   ]);
   state.trading = await api("/api/vpp/trading/dashboard").catch(() => null);
+  state.emsCapabilities = await api("/api/ems/capabilities").catch(() => null);
   if (!state.selectedStationId) state.selectedStationId = state.overview.stations[0].id;
   [state.stationDetail, state.twin] = await Promise.all([
     api(`/api/stations/${state.selectedStationId}`),
     api(`/api/digital-twin/stations/${state.selectedStationId}`),
   ]);
   state.twinSimulation = null;
+  state.emsDispatch = null;
   renderOverview();
   renderStation();
   renderTwin();
   renderDispatch();
+  renderEms();
   renderRoi();
   renderVpp();
   renderRevenueProof();
@@ -506,6 +513,76 @@ function renderStoragePlan() {
   `).join("");
 }
 
+function renderEms() {
+  const capabilities = state.emsCapabilities;
+  $("emsBoundary").textContent = t("ems.recommendation");
+  if (!capabilities) {
+    $("emsAlgorithms").innerHTML = "";
+    $("emsResult").textContent = state.lang === "zh" ? "高级 EMS 能力不可用" : "Advanced EMS is unavailable";
+    $("emsRun").disabled = true;
+    return;
+  }
+  $("emsRun").disabled = false;
+  const labels = state.lang === "zh"
+    ? { forecast: "共形预测", dispatch: "DRO-CVaR MPC", network: "三相 DistFlow", coordination: "ADMM 聚合" }
+    : { forecast: "Conformal forecast", dispatch: "DRO-CVaR MPC", network: "Three-phase DistFlow", coordination: "ADMM coordination" };
+  $("emsAlgorithms").innerHTML = ["forecast", "dispatch", "network", "coordination"].map((key) =>
+    `<span class="tag" title="${capabilities.algorithms[key]}">${labels[key]} · ${capabilities.algorithms[key]}</span>`
+  ).join("");
+  const result = state.emsDispatch;
+  if (!result) {
+    $("emsResult").textContent = capabilities.persistence_enabled
+      ? t("ems.persisted")
+      : `${t("ems.transient")} · ${t("ems.recommendation")}`;
+    $("emsPlan").innerHTML = "";
+    return;
+  }
+  if (result.error) {
+    $("emsResult").textContent = `${t("ems.failed")}: ${result.error}`;
+    $("emsPlan").innerHTML = "";
+    return;
+  }
+  const evidenceLabel = result.evidence?.persisted ? t("ems.persisted") : t("ems.transient");
+  $("emsResult").innerHTML = `<div class="dispatch-meta">
+    <span class="tag">${t("ems.expected")} ${money(result.risk.expected_cost)} CNY</span>
+    <span class="tag">${t("ems.var")} ${money(result.risk.var_cost)} CNY</span>
+    <span class="tag high">${t("ems.cvar")} ${money(result.risk.cvar_cost)} CNY</span>
+    <span class="tag">${t("ems.scenarios")} ${result.scenario_count}</span>
+    <span class="tag">${evidenceLabel}</span>
+  </div>`;
+  $("emsPlan").innerHTML = result.dispatch_plan.slice(0, 8).map((row) => `
+    <div class="plan-row">
+      <strong>${new Date(row.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${number(row.storage_power_kw, 1)} kW</strong>
+      <p>SOC ${number(row.projected_soc * 100, 1)}% · Grid ${number(row.expected_grid_kw, 1)} kW</p>
+      <small>${state.lang === "zh" ? "变压器余量" : "Transformer margin"} ${number(row.transformer_margin_kw, 1)} kW</small>
+    </div>
+  `).join("");
+}
+
+async function runEmsDispatch() {
+  const button = $("emsRun");
+  button.disabled = true;
+  $("emsResult").textContent = t("ems.running");
+  try {
+    state.emsDispatch = await api("/api/ems/dispatch-runs", {
+      method: "POST",
+      body: JSON.stringify({
+        station_id: state.selectedStationId,
+        horizon: Number($("emsHorizon").value),
+        interval_minutes: 60,
+        scenario_count: 24,
+        risk_alpha: Number($("emsRisk").value),
+        idempotency_key: `ui-ems-${state.selectedStationId}-${Date.now()}`,
+      }),
+    });
+  } catch (error) {
+    state.emsDispatch = { error: error.message };
+  } finally {
+    renderEms();
+    button.disabled = false;
+  }
+}
+
 async function renderRoi() {
   const capacity = $("capacityInput").value;
   const power = $("powerInput").value;
@@ -666,11 +743,14 @@ $("stationSelect").addEventListener("change", async (event) => {
     api(`/api/digital-twin/stations/${state.selectedStationId}`),
   ]);
   state.twinSimulation = null;
+  state.emsDispatch = null;
   renderStation();
   renderTwin();
   renderDispatch();
+  renderEms();
 });
 $("twRunSimulation").addEventListener("click", runTwinSimulation);
+$("emsRun").addEventListener("click", runEmsDispatch);
 ["capacityInput", "powerInput", "capexInput", "vppInput"].forEach((id) => $(id).addEventListener("input", renderRoi));
 window.addEventListener("resize", () => {
   if (state.overview) {

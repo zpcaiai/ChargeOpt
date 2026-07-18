@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import math
 import os
 import statistics
 import urllib.error
@@ -14,11 +13,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+import numpy as np
+
+from .advanced_ems import ALGORITHMS, calibrated_ensemble_forecast, canonical_hash
 from .analytics import adjustable_capacity
+from .config import get_settings
 from .data import Repository
 
-FORECAST_ALGORITHM = "conformal-seasonal-ensemble-v1"
-OPTIMIZER_ALGORITHM = "cvar-portfolio-mpc-v1"
+FORECAST_ALGORITHM = ALGORITHMS["forecast"]
+OPTIMIZER_ALGORITHM = "scenario-cvar-vpp-bid-v2"
 
 ORDER_TRANSITIONS: dict[str, set[str]] = {
     "draft": {"risk_rejected", "ready"},
@@ -159,7 +162,7 @@ def probabilistic_portfolio_forecast(
     interval_minutes: int = 15,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Build a calibrated quantile forecast from station seasonality and residuals."""
+    """Build correlated station and portfolio scenarios with conformal calibration."""
 
     now = (now or datetime.now(UTC)).astimezone(UTC)
     stations = [station for station in repo.stations if station.tenant_id == tenant_id]
@@ -167,38 +170,72 @@ def probabilistic_portfolio_forecast(
         raise ValueError("tenant has no VPP resources")
     intervals = max(1, horizon_hours * 60 // interval_minutes)
     station_rows: dict[str, list[dict[str, Any]]] = {}
+    station_scenarios: dict[str, list[list[float]]] = {}
+    capacity_scenarios: dict[str, list[list[float]]] = {}
+    calibration_rows: list[dict[str, Any]] = []
+    quality_gates: list[dict[str, Any]] = []
+    regularization: dict[str, dict[str, Any]] = {}
     all_latest: list[datetime] = []
+    scenario_count = 32
+    evidence_class = "observed" if get_settings().use_db else "synthetic"
     for station in stations:
         points = sorted(repo.station_points(station.id), key=lambda item: item.timestamp)
-        if not points:
+        if len(points) < 12:
             continue
         all_latest.append(points[-1].timestamp.astimezone(UTC))
-        loads = [point.grid_kw for point in points]
-        center = statistics.median(loads)
-        residuals = [abs(value - center) for value in loads]
-        robust_sigma = max(1.0, statistics.median(residuals) * 1.4826)
-        trend = (loads[-1] - loads[max(0, len(loads) - 5)]) / max(1, min(4, len(loads) - 1))
-        rows: list[dict[str, Any]] = []
-        for index in range(intervals):
-            at = now + timedelta(minutes=index * interval_minutes)
-            hour_angle = 2 * math.pi * (at.hour + at.minute / 60) / 24
-            seasonal = center * (1 + 0.16 * math.sin(hour_angle - 1.1) + 0.09 * math.sin(2 * hour_angle + 0.4))
-            recency = loads[-1] * math.exp(-index / 16) + seasonal * (1 - math.exp(-index / 16))
-            p50 = max(0.0, recency + trend * min(index, 8) * 0.25)
-            width = robust_sigma * (1.28 + 0.015 * index)
-            rows.append(
-                {
-                    "at": at.isoformat(),
-                    "p10_grid_kw": round(max(0, p50 - width), 3),
-                    "p50_grid_kw": round(p50, 3),
-                    "p90_grid_kw": round(p50 + width, 3),
-                    "adjustable_p10_kw": round(adjustable_capacity(station, points[-1]) * 0.82, 3),
-                    "adjustable_p50_kw": round(adjustable_capacity(station, points[-1]), 3),
-                }
-            )
+        timestamps = np.asarray([point.timestamp.astimezone(UTC).timestamp() for point in points], dtype=float)
+        interval_seconds = interval_minutes * 60
+        regular_timestamps = np.arange(timestamps[0], timestamps[-1] + 1, interval_seconds)
+        history = np.interp(regular_timestamps, timestamps, [float(point.grid_kw) for point in points]).tolist()
+        if len(history) < 12:
+            continue
+        forecast = calibrated_ensemble_forecast(
+            history,
+            horizon=intervals,
+            interval_minutes=interval_minutes,
+            coverage=0.8,
+            scenario_count=scenario_count,
+            seed=37,
+            start_at=now,
+            evidence_class=evidence_class,
+        )
+        base_capacity = adjustable_capacity(station, points[-1])
+        scenarios = np.asarray(forecast["scenarios_kw"], dtype=float)
+        p50 = np.asarray([row["p50_grid_kw"] for row in forecast["rows"]], dtype=float)
+        forecast_error_ratio = np.minimum(0.45, np.abs(scenarios - p50) / max(1.0, station.transformer_capacity_kw))
+        availability = np.maximum(
+            0,
+            base_capacity * float(station.reliability_score) * (1 - forecast_error_ratio),
+        )
+        capacity_p10 = np.quantile(availability, 0.10, axis=0)
+        capacity_p50 = np.quantile(availability, 0.50, axis=0)
+        rows = [
+            row
+            | {
+                "adjustable_p10_kw": round(float(capacity_p10[index]), 3),
+                "adjustable_p50_kw": round(float(capacity_p50[index]), 3),
+            }
+            for index, row in enumerate(forecast["rows"])
+        ]
         station_rows[station.id] = rows
+        station_scenarios[station.id] = forecast["scenarios_kw"]
+        capacity_scenarios[station.id] = availability.tolist()
+        calibration_rows.append(forecast["calibration"])
+        quality_gates.append(forecast["quality_gate"])
+        regularization[station.id] = {
+            "source_sample_count": len(points),
+            "regularized_sample_count": len(history),
+            "interval_minutes": interval_minutes,
+            "method": "linear_time_interpolation",
+        }
     if not station_rows:
         raise ValueError("no telemetry is available for VPP forecasting")
+    portfolio_grid_scenarios = np.sum(
+        np.asarray([station_scenarios[station_id] for station_id in station_rows]), axis=0
+    )
+    portfolio_capacity_scenarios = np.sum(
+        np.asarray([capacity_scenarios[station_id] for station_id in station_rows]), axis=0
+    )
     portfolio: list[dict[str, Any]] = []
     for index in range(intervals):
         rows = [values[index] for values in station_rows.values()]
@@ -215,17 +252,52 @@ def probabilistic_portfolio_forecast(
     freshness = max(0, int((now - min(all_latest)).total_seconds())) if all_latest else 10**9
     coverage = len(station_rows) / len(stations)
     sample_factor = min(1.0, sum(len(repo.station_points(s.id)) for s in stations) / max(24, len(stations) * 24))
-    calibration = max(0.5, min(0.99, 0.72 + 0.17 * coverage + 0.10 * sample_factor))
+    calibration_error = statistics.mean(abs(float(row["empirical_coverage"]) - 0.8) for row in calibration_rows)
+    calibration = max(0.5, min(0.99, (1 - calibration_error) * (0.85 + 0.1 * coverage + 0.05 * sample_factor)))
     return {
         "algorithm": FORECAST_ALGORITHM,
+        "scenario_algorithm": ALGORITHMS["scenario"],
+        "evidence_class": evidence_class,
+        "input_hash": canonical_hash(
+            {
+                "tenant_id": tenant_id,
+                "horizon_hours": horizon_hours,
+                "interval_minutes": interval_minutes,
+                "now": now,
+                "station_input_hashes": {
+                    station_id: canonical_hash(station_scenarios[station_id]) for station_id in station_rows
+                },
+            }
+        ),
         "horizon_start": now.isoformat(),
         "horizon_end": (now + timedelta(hours=horizon_hours)).isoformat(),
         "interval_minutes": interval_minutes,
-        "training_window_hours": max(len(repo.station_points(station.id)) for station in stations),
+        "training_window_hours": round(
+            max(
+                (
+                    max(repo.station_points(station.id), key=lambda point: point.timestamp).timestamp
+                    - min(repo.station_points(station.id), key=lambda point: point.timestamp).timestamp
+                ).total_seconds()
+                / 3600
+                for station in stations
+                if repo.station_points(station.id)
+            ),
+            3,
+        ),
         "data_freshness_seconds": freshness,
         "calibration_score": round(calibration, 5),
+        "calibration": calibration_rows,
+        "quality_gate": {
+            "qualified_for_bidding": all(row["qualified_for_dispatch"] for row in quality_gates),
+            "station_gates": quality_gates,
+        },
+        "history_regularization": regularization,
+        "scenario_count": scenario_count,
+        "cross_station_scenario_coupling": "synchronized_residual_block_indices",
         "stations": station_rows,
         "portfolio": portfolio,
+        "portfolio_grid_scenarios_kw": portfolio_grid_scenarios.round(5).tolist(),
+        "portfolio_capacity_scenarios_kw": portfolio_capacity_scenarios.round(5).tolist(),
     }
 
 
@@ -237,13 +309,19 @@ def optimize_bid_blocks(
     *,
     product: str = "demand_response",
 ) -> list[dict[str, Any]]:
-    """Create conservative bid blocks using quantile capacity and CVaR reserve."""
+    """Create conservative bid blocks with explicit scenario CVaR shortfall."""
 
+    if not forecast.get("quality_gate", {}).get("qualified_for_bidding", False):
+        raise ValueError("portfolio forecast quality gate blocked bidding")
     interval_minutes = int(forecast["interval_minutes"])
     station_map = {station.id: station for station in repo.stations if station.tenant_id == tenant_id}
     blocks: list[dict[str, Any]] = []
     reserve_margin = float(policy["reserve_margin"])
     max_order = float(policy["max_order_kw"])
+    risk_alpha = float(policy.get("cvar_alpha", 0.95))
+    if not 0.5 < risk_alpha < 1:
+        raise ValueError("cvar_alpha must be between 0.5 and 1")
+    capacity_scenarios = np.asarray(forecast["portfolio_capacity_scenarios_kw"], dtype=float)
     for index, row in enumerate(forecast["portfolio"]):
         available = max(0.0, float(row["adjustable_p10_kw"]) * (1 - reserve_margin))
         quantity = min(max_order, available)
@@ -277,6 +355,11 @@ def optimize_bid_blocks(
         degradation = 0.055
         scarcity = max(0.0, 1 - quantity / max(1, float(row["adjustable_p50_kw"]))) * 0.18
         limit_price = max(float(policy["min_price_per_kwh"]), energy_cost * 0.12 + degradation + scarcity)
+        delivery_capacity = capacity_scenarios[:, index] * (1 - reserve_margin)
+        shortfalls = np.maximum(0, quantity - delivery_capacity)
+        var_shortfall = float(np.quantile(shortfalls, risk_alpha, method="higher"))
+        tail = shortfalls[shortfalls >= var_shortfall]
+        cvar_shortfall = float(np.mean(tail)) if len(tail) else 0.0
         blocks.append(
             {
                 "product": product,
@@ -286,9 +369,12 @@ def optimize_bid_blocks(
                 "quantity_kw": round(quantity, 3),
                 "limit_price_per_kwh": round(limit_price, 5),
                 "confidence": float(forecast["calibration_score"]),
-                "expected_shortfall_kw": round(
-                    max(0, float(row["adjustable_p50_kw"]) - float(row["adjustable_p10_kw"])), 3
-                ),
+                "expected_shortfall_kw": round(float(np.mean(shortfalls)), 3),
+                "var_shortfall_kw": round(var_shortfall, 3),
+                "cvar_shortfall_kw": round(cvar_shortfall, 3),
+                "cvar_alpha": risk_alpha,
+                "risk_scenario_count": len(shortfalls),
+                "risk_algorithm": "empirical-capacity-shortfall-cvar-v1",
                 "allocation": allocations,
                 "optimizer": OPTIMIZER_ALGORITHM,
             }

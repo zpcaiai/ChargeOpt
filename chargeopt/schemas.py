@@ -504,6 +504,64 @@ class OptimizationRunResponse(BaseModel):
     constraints: dict[str, Any]
 
 
+class EmsForecastRequest(BaseModel):
+    station_id: str
+    history_kw: list[float] | None = Field(default=None, min_length=12, max_length=100000)
+    horizon: int = Field(default=24, ge=1, le=672)
+    interval_minutes: Literal[5, 15, 30, 60] = 60
+    coverage: Literal[0.8] = 0.8
+    scenario_count: int = Field(default=24, ge=4, le=256)
+    random_seed: int = 17
+    use_foundation_model: bool = False
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class EmsDispatchRequest(EmsForecastRequest):
+    prices: list[float] | None = Field(default=None, min_length=1, max_length=672)
+    initial_soc: float | None = Field(default=None, gt=0, le=1)
+    soh: float = Field(default=0.95, gt=0, le=1)
+    temperature_c: float = Field(default=25, ge=-30, le=90)
+    risk_alpha: float = Field(default=0.95, gt=0.5, lt=1)
+    risk_weight: float = Field(default=0.25, ge=0, le=1000)
+    demand_charge_per_kw: float | None = Field(default=None, ge=0)
+    reserve_soc: float = Field(default=0.32, ge=0.2, le=0.92)
+
+
+class EmsNetworkProjectionRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str | None = None
+    evidence_class: Literal["synthetic", "replay", "shadow", "observed"] = "replay"
+    network: dict[str, Any]
+    proposals: list[dict[str, Any]] = Field(min_length=1, max_length=10000)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class EmsCoordinationRequest(BaseModel):
+    tenant_id: str | None = None
+    resources: list[dict[str, Any]] = Field(min_length=2, max_length=10000)
+    target_kw: float
+    rho: float = Field(default=1, gt=0, le=10000)
+    tolerance: float = Field(default=0.0001, gt=0, le=0.1)
+    max_iterations: int = Field(default=500, ge=10, le=10000)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class EmsOfflinePolicyRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str | None = None
+    transitions: list[dict[str, Any]] = Field(min_length=12, max_length=200000)
+    actions_kw: list[float] = Field(min_length=2, max_length=101)
+    evaluation_state: list[float] = Field(min_length=1, max_length=1000)
+    safety_constraints: dict[str, float]
+    conservative_penalty: float = Field(default=0.2, ge=0, le=1000)
+    max_mahalanobis: float = Field(default=4, gt=0, le=1000)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class EmsResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+
 class VppSettlementRequest(BaseModel):
     event_id: str = Field(min_length=1)
     baseline_kw: float = Field(ge=0)
