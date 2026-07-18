@@ -42,13 +42,17 @@ def build_revenue_diagnostics(repo: Repository, station_id: str | None = None) -
             "monthly_scale_days": MONTHLY_DAYS,
         },
         "algorithm": {
-            "name": "counterfactual-profit-proof-v1",
+            "name": "engineering-counterfactual-profit-proof-v2",
             "methods": [
-                "seasonal_synthetic_control_baseline",
-                "doubly_robust_operational_attribution",
+                "same_window_no_ems_engineering_baseline",
+                "component_accounting_attribution",
                 "risk_constrained_mpc_milp_dispatch",
                 "reliability_weighted_vpp_allocation",
             ],
+            "causal_claim_boundary": (
+                "This endpoint is an engineering counterfactual. Auditable causal uplift requires "
+                "/api/v1/digital-twin/causal-studies with overlap and placebo gates."
+            ),
             "guardrails": [
                 "positive uplift requires actual margin above counterfactual margin",
                 "confidence interval penalizes hourly residual volatility",

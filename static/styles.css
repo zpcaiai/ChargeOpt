@@ -558,6 +558,92 @@ tr.station-row:hover {
   min-height: 360px;
 }
 
+.twin-gate {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid #a7d7c7;
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: #f2fbf7;
+}
+
+.twin-gate.blocked {
+  border-color: #f2b8b5;
+  border-left-color: var(--red);
+  background: #fff7f6;
+}
+
+.twin-gate p {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.twin-topology {
+  display: grid;
+  gap: 14px;
+}
+
+.topology-summary,
+.twin-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.asset-node {
+  min-height: 92px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--blue);
+  border-radius: 6px;
+  background: #fbfcfe;
+  overflow-wrap: anywhere;
+}
+
+.asset-node span,
+.asset-node small,
+.asset-node strong {
+  display: block;
+}
+
+.asset-node span,
+.asset-node small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.asset-node strong {
+  margin: 7px 0;
+  font-size: 13px;
+}
+
+.asset-transformer,
+.asset-meter {
+  border-left-color: var(--amber);
+}
+
+.asset-pcs,
+.asset-battery_system {
+  border-left-color: var(--green);
+}
+
+.asset-pv_inverter {
+  border-left-color: var(--teal);
+}
+
+.asset-gateway {
+  border-left-color: var(--red);
+}
+
 @media (max-width: 1120px) {
   .metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -584,7 +670,7 @@ tr.station-row:hover {
   }
 
   .nav {
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, 1fr);
   }
 
   .nav-item {
@@ -618,5 +704,13 @@ tr.station-row:hover {
   .metric-grid,
   .metric-grid.compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .asset-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .twin-gate {
+    align-items: flex-start;
   }
 }

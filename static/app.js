@@ -3,6 +3,8 @@ const state = {
   revenueDiagnostics: null,
   trading: null,
   stationDetail: null,
+  twin: null,
+  twinSimulation: null,
   selectedStationId: null,
   lang: localStorage.getItem("lang") || "zh",
   token: sessionStorage.getItem("chargeoptToken"),
@@ -16,6 +18,7 @@ const TRANSLATIONS = {
   zh: {
     "nav.cockpit": "驾驶舱", "nav.cockpit.title": "运营驾驶舱",
     "nav.station": "站点", "nav.station.title": "站点详情",
+    "nav.twin": "孪生", "nav.twin.title": "充电站数字孪生",
     "nav.dispatch": "调度", "nav.dispatch.title": "调度中心",
     "nav.roi": "ROI", "nav.roi.title": "储能ROI模拟",
     "nav.vpp": "VPP", "nav.vpp.title": "VPP资源",
@@ -56,10 +59,17 @@ const TRANSLATIONS = {
     "trade.market": "交易市场", "trade.openOrders": "未结订单", "trade.orders": "笔", "trade.filled": "24h 成交", "trade.breaker": "熔断器",
     "trade.ordersTitle": "市场订单", "trade.ordersDesc": "报价、成交、交付窗口和风险状态", "trade.status": "状态", "trade.product": "产品", "trade.delivery": "交付", "trade.quantity": "容量", "trade.price": "限价", "trade.fill": "成交",
     "trade.autopilot": "自动交易", "trade.autopilotDesc": "预测、风控、报价与场站调度闭环", "trade.settlements": "结算与证据", "trade.settlementsDesc": "计量基线、偏差费用、罚金和证据根哈希",
+    "twin.trust": "孪生可信度", "twin.headroom": "变压器余量", "twin.evidence": "证据等级",
+    "twin.autoGate": "自动控制门", "twin.topology": "设备拓扑", "twin.topologyDesc": "站点电气关系、设备容量与通信控制边界",
+    "twin.diagnostics": "诊断事件", "twin.diagnosticsDesc": "基于拓扑、残差和约束传播的根因排序",
+    "twin.trajectory": "物理轨迹", "twin.trajectoryDesc": "负荷、光伏、储能与变压器约束的确定性仿真",
+    "twin.scenario": "场景实验", "twin.scenarioDesc": "在隔离仿真中调整负荷和储能动作",
+    "twin.loadMultiplier": "负荷倍率", "twin.storageCommand": "储能指令 kW", "twin.horizon": "仿真步数", "twin.run": "运行仿真",
   },
   en: {
     "nav.cockpit": "Cockpit", "nav.cockpit.title": "Operating cockpit",
     "nav.station": "Station", "nav.station.title": "Station detail",
+    "nav.twin": "Twin", "nav.twin.title": "Charging-station digital twin",
     "nav.dispatch": "Dispatch", "nav.dispatch.title": "Dispatch center",
     "nav.roi": "ROI", "nav.roi.title": "Storage ROI simulator",
     "nav.vpp": "VPP", "nav.vpp.title": "VPP resources",
@@ -100,6 +110,12 @@ const TRANSLATIONS = {
     "trade.market": "Market", "trade.openOrders": "Open orders", "trade.orders": "orders", "trade.filled": "24h filled", "trade.breaker": "Circuit breaker",
     "trade.ordersTitle": "Market orders", "trade.ordersDesc": "Bid, fill, delivery window, and risk state", "trade.status": "Status", "trade.product": "Product", "trade.delivery": "Delivery", "trade.quantity": "Capacity", "trade.price": "Limit", "trade.fill": "Filled",
     "trade.autopilot": "Trading autopilot", "trade.autopilotDesc": "Forecast, risk, bid, and site dispatch closure", "trade.settlements": "Settlement evidence", "trade.settlementsDesc": "Meter baseline, imbalance, penalties, and evidence root hash",
+    "twin.trust": "Twin trust", "twin.headroom": "Transformer headroom", "twin.evidence": "Evidence class",
+    "twin.autoGate": "Autonomy gate", "twin.topology": "Asset topology", "twin.topologyDesc": "Electrical flow, equipment ratings, and control boundaries",
+    "twin.diagnostics": "Diagnostics", "twin.diagnosticsDesc": "Root causes ranked from topology, residuals, and constraints",
+    "twin.trajectory": "Physical trajectory", "twin.trajectoryDesc": "Deterministic load, PV, storage, and transformer simulation",
+    "twin.scenario": "Scenario lab", "twin.scenarioDesc": "Adjust load and storage actions in an isolated simulation",
+    "twin.loadMultiplier": "Load multiplier", "twin.storageCommand": "Storage command kW", "twin.horizon": "Simulation steps", "twin.run": "Run simulation",
   },
 };
 
@@ -141,7 +157,7 @@ function toggleLang() {
   state.lang = state.lang === "zh" ? "en" : "zh";
   localStorage.setItem("lang", state.lang);
   applyLang();
-  if (state.overview) { renderOverview(); renderStation(); renderDispatch(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
+  if (state.overview) { renderOverview(); renderStation(); renderTwin(); renderDispatch(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
 }
 
 async function api(path, options = {}) {
@@ -167,9 +183,14 @@ async function loadAll() {
   ]);
   state.trading = await api("/api/vpp/trading/dashboard").catch(() => null);
   if (!state.selectedStationId) state.selectedStationId = state.overview.stations[0].id;
-  state.stationDetail = await api(`/api/stations/${state.selectedStationId}`);
+  [state.stationDetail, state.twin] = await Promise.all([
+    api(`/api/stations/${state.selectedStationId}`),
+    api(`/api/digital-twin/stations/${state.selectedStationId}`),
+  ]);
+  state.twinSimulation = null;
   renderOverview();
   renderStation();
+  renderTwin();
   renderDispatch();
   renderRoi();
   renderVpp();
@@ -233,9 +254,14 @@ function renderStationRows() {
     row.addEventListener("click", async () => {
       state.selectedStationId = row.dataset.station;
       $("stationSelect").value = state.selectedStationId;
-      state.stationDetail = await api(`/api/stations/${state.selectedStationId}`);
+      [state.stationDetail, state.twin] = await Promise.all([
+        api(`/api/stations/${state.selectedStationId}`),
+        api(`/api/digital-twin/stations/${state.selectedStationId}`),
+      ]);
+      state.twinSimulation = null;
       setView("station");
       renderStation();
+      renderTwin();
       renderDispatch();
     });
   });
@@ -304,6 +330,149 @@ function renderStation() {
     </div>
   `).join("");
   renderStoragePlan();
+}
+
+function renderTwin() {
+  if (!state.twin) return;
+  const twin = state.twin;
+  const snapshot = twin.state;
+  const topology = twin.topology;
+  const stateByCode = Object.fromEntries(snapshot.states.map((item) => [item.state_code, item]));
+  $("twTrust").textContent = `${number(snapshot.trust_score * 100, 1)}%`;
+  $("twHealth").textContent = snapshot.health;
+  $("twSoc").textContent = `${number(snapshot.storage_soc * 100, 1)}%`;
+  $("twSoh").textContent = `SOH ${number(snapshot.estimated_soh * 100, 1)}%`;
+  $("twHeadroom").textContent = number(snapshot.transformer_headroom_kw, 1);
+  $("twEvidence").textContent = snapshot.contract.evidence_class;
+  $("twModel").textContent = snapshot.contract.model_version;
+  const gate = snapshot.autonomy_gate;
+  $("twGate").classList.toggle("blocked", !gate.allowed);
+  $("twGateStatus").textContent = gate.allowed ? (state.lang === "zh" ? "允许" : "Allowed") : (state.lang === "zh" ? "已阻断" : "Blocked");
+  $("twGateText").textContent = gate.allowed
+    ? (state.lang === "zh" ? "状态、证据和现场资格满足自动控制要求。" : "State, evidence, and field qualification satisfy autonomy requirements.")
+    : gate.reasons.map(twinGateReason).join(" · ");
+  $("twTopologyStatus").textContent = `${topology.validation.asset_count} ${state.lang === "zh" ? "个资产" : "assets"}`;
+  renderTwinTopology(topology);
+  renderTwinDiagnostics(twin.diagnostics.diagnostics);
+
+  const trajectory = state.twinSimulation
+    ? state.twinSimulation.trajectory.map((row) => ({
+      ...row,
+      label: row.timestamp ? new Date(row.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : `${row.step}`,
+    }))
+    : state.stationDetail.telemetry;
+  drawLineChart($("twTrajectory"), trajectory, [
+    { key: "grid_kw", label: state.lang === "zh" ? "电网" : "Grid", color: "#2563eb" },
+    { key: "load_kw", label: state.lang === "zh" ? "负荷" : "Load", color: "#0f9f6e" },
+    { key: "pv_kw", label: state.lang === "zh" ? "光伏" : "PV", color: "#d97706" },
+  ]);
+  if (state.twinSimulation) {
+    const metrics = state.twinSimulation.metrics;
+    $("twSimulationStatus").textContent = state.twinSimulation.contract.evidence_class;
+    $("twSimulationMetrics").innerHTML = `
+      <span class="tag">${state.lang === "zh" ? "峰值" : "Peak"} ${number(metrics.max_grid_kw, 1)} kW</span>
+      <span class="tag">${state.lang === "zh" ? "吞吐量" : "Throughput"} ${number(metrics.battery_throughput_kwh, 1)} kWh</span>
+      <span class="tag ${metrics.constraint_violation_count ? "critical" : "low"}">${state.lang === "zh" ? "约束越界" : "Violations"} ${metrics.constraint_violation_count}</span>
+      <span class="tag">SOC ${number(metrics.final_soc * 100, 1)}%</span>
+    `;
+  } else {
+    $("twSimulationStatus").textContent = state.lang === "zh" ? "实测轨迹" : "Measured trajectory";
+    $("twSimulationMetrics").innerHTML = `
+      <span class="tag">${state.lang === "zh" ? "平衡残差" : "Balance residual"} ${number(snapshot.balance_residual_kw, 2)} kW</span>
+      <span class="tag">${state.lang === "zh" ? "效率" : "Efficiency"} ${number((stateByCode.conversion_efficiency?.value || 0) * 100, 1)}%</span>
+    `;
+  }
+}
+
+function renderTwinTopology(topology) {
+  const counts = topology.assets.reduce((result, asset) => {
+    result[asset.asset_type] = (result[asset.asset_type] || 0) + 1;
+    return result;
+  }, {});
+  const infrastructure = topology.assets.filter((asset) => asset.asset_type !== "connector").slice(0, 18);
+  $("twTopology").innerHTML = `
+    <div class="topology-summary">${Object.entries(counts).map(([type, count]) => `<span class="tag">${twinAssetType(type)} ${count}</span>`).join("")}</div>
+    <div class="asset-grid">${infrastructure.map((asset) => `
+      <div class="asset-node asset-${asset.asset_type}">
+        <span>${twinAssetType(asset.asset_type)}</span>
+        <strong>${asset.name}</strong>
+        <small>${asset.rated_power_kw ? `${number(asset.rated_power_kw)} kW` : asset.asset_key}</small>
+      </div>
+    `).join("")}</div>
+  `;
+}
+
+function renderTwinDiagnostics(diagnostics) {
+  $("twDiagnostics").innerHTML = diagnostics.length ? diagnostics.map((item) => `
+    <div class="event">
+      <strong>${item.diagnostic_type}</strong>
+      <p>${item.summary}</p>
+      <div class="dispatch-meta"><span class="tag ${item.severity}">${tPriority(item.severity)}</span><span class="tag">${number(item.confidence * 100, 0)}%</span></div>
+      <small>${item.likely_causes.join(" · ")}</small>
+    </div>
+  `).join("") : `<p>${state.lang === "zh" ? "当前未发现孪生诊断事件。" : "No twin diagnostic events detected."}</p>`;
+}
+
+function twinGateReason(reason) {
+  if (state.lang !== "zh") return reason.replaceAll("_", " ");
+  return {
+    critical_measurements_missing: "关键测点缺失",
+    telemetry_stale: "遥测已过期",
+    twin_trust_below_threshold: "孪生可信度不足",
+    power_balance_residual_high: "功率平衡残差过高",
+    field_qualification_required_for_autonomy: "尚未完成现场资格认证",
+  }[reason] || reason;
+}
+
+function twinAssetType(type) {
+  if (state.lang !== "zh") return type.replaceAll("_", " ");
+  return {
+    station: "站点", transformer: "变压器", bus: "母线", meter: "电表", charger: "充电机",
+    connector: "充电枪", pcs: "PCS", battery_system: "储能系统", battery_rack: "电池簇",
+    battery_pack: "电池包", pv_inverter: "光伏逆变器", sensor: "传感器", gateway: "边缘网关",
+  }[type] || type;
+}
+
+async function runTwinSimulation() {
+  const button = $("twRunSimulation");
+  button.disabled = true;
+  try {
+    const horizon = Number($("twHorizon").value);
+    const loadMultiplier = Number($("twLoadMultiplier").value);
+    const storageCommand = Number($("twStorageCommand").value);
+    const source = state.stationDetail.forecast;
+    const start = Date.now();
+    const schedule = Array.from({ length: horizon }, (_, index) => {
+      const row = source[index % source.length];
+      return {
+        timestamp: new Date(start + index * 15 * 60 * 1000).toISOString(),
+        load_kw: Number(row.load_kw || row.grid_kw || 0) * loadMultiplier,
+        pv_kw: Number(row.pv_kw || 0),
+        storage_power_kw: storageCommand,
+        ambient_temperature_c: 30,
+        arrivals: Number(row.queue_length || 0) * 0.2,
+      };
+    });
+    const evidenceClass = state.twin.state.contract.evidence_class;
+    state.twinSimulation = await api("/api/digital-twin/simulations", {
+      method: "POST",
+      body: JSON.stringify({
+        station_id: state.selectedStationId,
+        scenario_type: evidenceClass === "synthetic" ? "what_if" : "shadow",
+        evidence_class: evidenceClass,
+        interval_minutes: 15,
+        idempotency_key: `ui-${state.selectedStationId}-${Date.now()}`,
+        initial_state: {
+          storage_soc: state.twin.state.storage_soc,
+          storage_soh: state.twin.state.estimated_soh,
+        },
+        schedule,
+      }),
+    });
+    renderTwin();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderDispatch() {
@@ -492,10 +661,16 @@ $("loginForm").addEventListener("submit", async (event) => {
 });
 $("stationSelect").addEventListener("change", async (event) => {
   state.selectedStationId = event.target.value;
-  state.stationDetail = await api(`/api/stations/${state.selectedStationId}`);
+  [state.stationDetail, state.twin] = await Promise.all([
+    api(`/api/stations/${state.selectedStationId}`),
+    api(`/api/digital-twin/stations/${state.selectedStationId}`),
+  ]);
+  state.twinSimulation = null;
   renderStation();
+  renderTwin();
   renderDispatch();
 });
+$("twRunSimulation").addEventListener("click", runTwinSimulation);
 ["capacityInput", "powerInput", "capexInput", "vppInput"].forEach((id) => $(id).addEventListener("input", renderRoi));
 window.addEventListener("resize", () => {
   if (state.overview) {
@@ -506,6 +681,7 @@ window.addEventListener("resize", () => {
       { key: "storage_kw", label: zh3 ? "储能" : "Storage", color: "#6d28d9" },
     ]);
     renderStation();
+    renderTwin();
   }
 });
 

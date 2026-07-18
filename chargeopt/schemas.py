@@ -717,6 +717,161 @@ class ModelEvaluationResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Charging-station digital twin
+# ---------------------------------------------------------------------------
+
+
+EvidenceClass = Literal["synthetic", "replay", "shadow", "observed", "field_qualified"]
+
+
+class TwinAssetInput(BaseModel):
+    asset_key: str = Field(min_length=1, max_length=160)
+    asset_type: Literal[
+        "station",
+        "transformer",
+        "bus",
+        "meter",
+        "charger",
+        "connector",
+        "pcs",
+        "battery_system",
+        "battery_rack",
+        "battery_pack",
+        "pv_inverter",
+        "sensor",
+        "gateway",
+    ]
+    name: str = Field(min_length=1, max_length=240)
+    manufacturer: str | None = Field(default=None, max_length=160)
+    model: str | None = Field(default=None, max_length=160)
+    serial_number: str | None = Field(default=None, max_length=240)
+    rated_power_kw: float | None = Field(default=None, ge=0)
+    rated_energy_kwh: float | None = Field(default=None, ge=0)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class TwinRelationshipInput(BaseModel):
+    source_asset_key: str = Field(min_length=1, max_length=160)
+    target_asset_key: str = Field(min_length=1, max_length=160)
+    relationship_type: Literal["contains", "feeds", "meters", "controls", "communicates_with", "measures"]
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class TwinTopologyCreateRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str
+    assets: list[TwinAssetInput] = Field(min_length=1, max_length=10000)
+    relationships: list[TwinRelationshipInput] = Field(default_factory=list, max_length=30000)
+
+
+class TwinMeasurementInput(BaseModel):
+    asset_key: str | None = Field(default=None, max_length=160)
+    point_code: str = Field(min_length=1, max_length=160)
+    value: float
+    unit: str = Field(min_length=1, max_length=32)
+    source_timestamp: datetime
+    received_at: datetime | None = None
+    sequence_number: int | None = Field(default=None, ge=0)
+    source: str = Field(min_length=1, max_length=160)
+    idempotency_key: str | None = Field(default=None, max_length=300)
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TwinMeasurementBatchRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str
+    measurements: list[TwinMeasurementInput] = Field(min_length=1, max_length=5000)
+
+
+class TwinSimulationRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str
+    scenario_type: Literal["replay", "what_if", "shadow", "commissioning"] = "what_if"
+    evidence_class: EvidenceClass = "synthetic"
+    interval_minutes: int = Field(default=15, ge=1, le=60)
+    random_seed: int = 0
+    idempotency_key: str = Field(min_length=4, max_length=300)
+    initial_state: dict[str, Any] = Field(default_factory=dict)
+    schedule: list[dict[str, Any]] = Field(min_length=1, max_length=10000)
+
+
+class TwinOptimizationRequest(BaseModel):
+    station_id: str
+    horizon_hours: int = Field(default=24, ge=1, le=168)
+    objective: Literal["cost", "revenue", "balanced"] = "balanced"
+    mode: Literal["recommend", "auto"] = "recommend"
+
+
+class TwinCalibrationRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str
+    model_scope: str = Field(default="station_power_balance", min_length=3, max_length=160)
+    model_version: str = Field(default="electro-thermal-queue-twin-v1", min_length=3, max_length=160)
+    evidence_class: EvidenceClass = "observed"
+    predicted: list[float] = Field(min_length=1, max_length=100000)
+    observed: list[float] = Field(min_length=1, max_length=100000)
+
+
+class TwinTrajectoryComparisonRequest(BaseModel):
+    predicted: list[dict[str, Any]] = Field(min_length=1, max_length=100000)
+    observed: list[dict[str, Any]] = Field(min_length=1, max_length=100000)
+    fields: list[str] = Field(
+        default_factory=lambda: ["grid_kw", "storage_soc", "transformer_temperature_c"],
+        min_length=1,
+        max_length=20,
+    )
+
+
+class TwinMaintenanceTransitionRequest(BaseModel):
+    tenant_id: str | None = None
+    status: Literal["in_progress", "completed", "cancelled"]
+    assigned_to: str | None = Field(default=None, max_length=240)
+    outcome: dict[str, Any] | None = None
+
+
+class TwinFaultInjectionRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str
+
+
+class CausalObservation(BaseModel):
+    timestamp: datetime | None = None
+    treated: bool
+    outcome: float
+    covariates: dict[str, float]
+
+
+class TwinCausalStudyRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str | None = None
+    evidence_class: EvidenceClass = "observed"
+    estimand: str = Field(default="monthly_profit_lift", min_length=3, max_length=160)
+    observations: list[CausalObservation] = Field(min_length=1, max_length=100000)
+
+
+class TwinQualificationEvidenceRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str | None = None
+    evidence_date: datetime
+    category: Literal[
+        "topology",
+        "device_attestation",
+        "calibration",
+        "shadow_day",
+        "slo",
+        "fault_injection",
+        "recovery_drill",
+        "approval",
+    ]
+    qualified: bool
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class TwinResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 

@@ -32,6 +32,9 @@ The production control plane closes the loop from station economics through mark
 8. Revenue proof
    Charging revenue, energy purchase cost, demand charge exposure, storage arbitrage, demand charge savings, VPP revenue, battery degradation, payback, NPV, IRR, and monthly counterfactual profit lift. This layer answers the commercial question: "same site, with ChargeOpt vs. without ChargeOpt, how much more did the operator earn or avoid losing this month?" Proof runs can be persisted as tenant-scoped evidence snapshots for monthly business reviews.
 
+9. Charging-station digital twin
+   Versioned asset topology and immutable device measurements feed quality-aware state estimation. The estimated state includes SOC, SOH, transformer headroom, balance residual, confidence intervals, provenance, and a trust score. A deterministic electro-thermal and queue model supports replay and branchable what-if scenarios. Calibration, predicted-versus-realized comparison, topology-aware diagnostics, maintenance actions, AIPW causal studies, and field qualification remain separate evidence layers. Automatic control requires both a trusted state and field-qualified evidence; simulation never writes directly to devices.
+
 ## Revenue Proof Algorithm
 
 `chargeopt.revenue_intelligence` implements the proof engine behind `/api/v1/revenue-diagnostics`.

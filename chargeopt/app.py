@@ -13,6 +13,7 @@ import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -32,6 +33,36 @@ from .analytics import build_dispatch, build_overview, build_vpp, simulate_roi, 
 from .auth import ROLE_PERMISSIONS, Principal, development_principal, has_permission, static_api_key_principal
 from .config import get_settings
 from .db import close_pool, health_check, init_pool
+from .digital_twin import (
+    assess_field_qualification,
+    build_default_topology,
+    build_twin_snapshot,
+    calibrate_twin_model,
+    compare_trajectories,
+    diagnose_twin,
+    estimate_causal_uplift,
+    estimate_station_state,
+    normalize_measurement,
+    run_fault_injection_suite,
+    simulate_station,
+    twin_aware_station,
+)
+from .digital_twin_repository import (
+    activate_topology_version,
+    create_topology_version,
+    get_topology,
+    list_maintenance_actions,
+    load_measurements,
+    load_qualification_evidence,
+    persist_calibration,
+    persist_causal_study,
+    persist_diagnostics,
+    persist_measurements,
+    persist_simulation,
+    persist_state_estimate,
+    record_qualification_evidence,
+    transition_maintenance_action,
+)
 from .logging_config import configure_logging
 from .mlops import evaluate_model, list_models, promote_model, register_model
 from .operations_assurance import live_market_readiness, record_shadow_day, run_assurance_checks
@@ -115,6 +146,17 @@ from .schemas import (
     TaskResponse,
     TelemetryIngestRequest,
     TelemetryIngestResponse,
+    TwinCalibrationRequest,
+    TwinCausalStudyRequest,
+    TwinFaultInjectionRequest,
+    TwinMaintenanceTransitionRequest,
+    TwinMeasurementBatchRequest,
+    TwinOptimizationRequest,
+    TwinQualificationEvidenceRequest,
+    TwinResponse,
+    TwinSimulationRequest,
+    TwinTopologyCreateRequest,
+    TwinTrajectoryComparisonRequest,
     VppAutomationRunRequest,
     VppAutomationRunResponse,
     VppMeterIntervalRequest,
@@ -403,6 +445,9 @@ VppMeterWriteDep = Depends(require_write_permission("vpp:meter:write"))
 VppOperateDep = Depends(require_write_permission("vpp:operate"))
 ModelWriteDep = Depends(require_write_permission("model:write"))
 ModelApproveDep = Depends(require_write_permission("model:approve"))
+TwinReadDep = Depends(require_permission("twin:read"))
+TwinWriteDep = Depends(require_write_permission("twin:write"))
+TwinApproveDep = Depends(require_write_permission("twin:approve"))
 AuditReadDep = Depends(require_permission("audit:read"))
 
 
@@ -412,6 +457,25 @@ def _tenant_scope(principal: Principal) -> str | None:
 
 def _worker_tenant_scope(principal: Principal) -> str:
     return "*" if principal.is_platform_admin else principal.tenant_id or "t-001"
+
+
+def _twin_tenant(principal: Principal, requested_tenant: str | None, station_tenant: str | None) -> str:
+    target = requested_tenant or principal.tenant_id or station_tenant
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
+    if not principal.is_platform_admin and target != principal.tenant_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant access is denied.")
+    if station_tenant is not None and target != station_tenant:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Station belongs to another tenant.")
+    return target
+
+
+def _require_twin_database(settings: Any) -> None:
+    if not settings.use_db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Digital-twin evidence persistence requires DATABASE_URL.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +632,481 @@ def _build_v1_router(s: Any) -> APIRouter:
             return station_detail(repo, station_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @router.get("/digital-twin/stations/{station_id}", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _twin_snapshot(request: Request, station_id: str, _auth: Principal = TwinReadDep) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {station_id}")
+        evidence_class = "synthetic"
+        if s.use_db:
+            evidence_class = "observed"
+            tenant_id = _twin_tenant(_auth, None, station.tenant_id)
+            qualification = assess_field_qualification(
+                load_qualification_evidence(tenant_id, station_id, _tenant_scope(_auth))
+            )
+            if qualification["ready"]:
+                evidence_class = "field_qualified"
+        snapshot = build_twin_snapshot(repo, station_id, evidence_class=evidence_class)
+        snapshot["persisted"] = False
+        return snapshot
+
+    @router.get("/digital-twin/stations/{station_id}/topology", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _twin_topology(request: Request, station_id: str, _auth: Principal = TwinReadDep) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {station_id}")
+        if s.use_db:
+            tenant_id = _twin_tenant(_auth, None, station.tenant_id)
+            topology = get_topology(tenant_id, station_id, scope_tenant_id=_tenant_scope(_auth))
+            if topology:
+                return topology
+        return build_default_topology(station) | {"status": "synthetic_default"}
+
+    @router.post(
+        "/digital-twin/topologies",
+        response_model=TwinResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _create_twin_topology(
+        request: Request,
+        body: TwinTopologyCreateRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        _require_twin_database(s)
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == body.station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}")
+        tenant_id = _twin_tenant(_auth, body.tenant_id, station.tenant_id)
+        try:
+            return create_topology_version(
+                tenant_id,
+                body.station_id,
+                {
+                    "station_id": body.station_id,
+                    "assets": [item.model_dump() for item in body.assets],
+                    "relationships": [item.model_dump() for item in body.relationships],
+                },
+                _auth.subject,
+                _tenant_scope(_auth),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    @router.post("/digital-twin/topologies/{topology_id}/activate", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _activate_twin_topology(
+        request: Request,
+        topology_id: str,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = TwinApproveDep,
+    ) -> Any:
+        _require_twin_database(s)
+        target_tenant = _twin_tenant(_auth, tenant_id, _auth.tenant_id)
+        try:
+            return activate_topology_version(target_tenant, topology_id, _auth.subject, _tenant_scope(_auth))
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post(
+        "/digital-twin/measurements",
+        response_model=TwinResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    @limiter.limit(rl)
+    async def _ingest_twin_measurements(
+        request: Request,
+        body: TwinMeasurementBatchRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        _require_twin_database(s)
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == body.station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}")
+        tenant_id = _twin_tenant(_auth, body.tenant_id, station.tenant_id)
+        try:
+            normalized = [
+                normalize_measurement(
+                    item.model_dump() | {"station_id": body.station_id},
+                    station=station,
+                    received_at=item.received_at,
+                )
+                for item in body.measurements
+            ]
+            ingest_result = persist_measurements(
+                tenant_id,
+                body.station_id,
+                normalized,
+                _auth.subject,
+                _tenant_scope(_auth),
+            )
+            history = load_measurements(
+                tenant_id,
+                body.station_id,
+                limit=5000,
+                scope_tenant_id=_tenant_scope(_auth),
+            )
+            topology = get_topology(tenant_id, body.station_id, scope_tenant_id=_tenant_scope(_auth))
+            snapshot = estimate_station_state(
+                station,
+                history,
+                evidence_class="observed",
+                topology_version=topology["topology_hash"] if topology else None,
+            )
+            state_result = persist_state_estimate(
+                tenant_id,
+                body.station_id,
+                snapshot,
+                _auth.subject,
+                _tenant_scope(_auth),
+            )
+            diagnosis = diagnose_twin(station, snapshot)
+            diagnostic_result = persist_diagnostics(
+                tenant_id,
+                body.station_id,
+                diagnosis,
+                _auth.subject,
+                _tenant_scope(_auth),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        return {
+            "ingest": ingest_result,
+            "state": snapshot,
+            "state_persistence": state_result,
+            "diagnostics": diagnosis,
+            "diagnostic_persistence": diagnostic_result,
+        }
+
+    @router.post(
+        "/digital-twin/simulations",
+        response_model=TwinResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _run_twin_simulation(
+        request: Request,
+        body: TwinSimulationRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == body.station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}")
+        tenant_id = _twin_tenant(_auth, body.tenant_id, station.tenant_id)
+        evidence_class = body.evidence_class
+        if not s.use_db and evidence_class not in {"synthetic", "replay"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="A database-backed evidence trail is required for shadow, observed, or field-qualified simulation.",
+            )
+        simulation = simulate_station(
+            station,
+            body.initial_state,
+            body.schedule,
+            interval_minutes=body.interval_minutes,
+            evidence_class=evidence_class,
+            random_seed=body.random_seed,
+        )
+        diagnosis = diagnose_twin(
+            station,
+            {
+                "estimated_at": datetime.now(UTC).isoformat(),
+                "trust_score": 1.0 if evidence_class == "field_qualified" else 0.75,
+                "balance_residual_kw": 0,
+                "transformer_headroom_kw": station.transformer_capacity_kw - simulation["metrics"]["max_grid_kw"],
+                "autonomy_gate": {"allowed": evidence_class == "field_qualified", "reasons": []},
+                "contract": simulation["contract"],
+            },
+            simulation,
+        )
+        if not s.use_db:
+            return {"persisted": False, **simulation, "diagnostics": diagnosis}
+        result = persist_simulation(
+            tenant_id,
+            body.station_id,
+            simulation,
+            body.model_dump(mode="json"),
+            body.scenario_type,
+            body.idempotency_key,
+            _auth.subject,
+            _tenant_scope(_auth),
+        )
+        persist_diagnostics(
+            tenant_id,
+            body.station_id,
+            diagnosis,
+            _auth.subject,
+            _tenant_scope(_auth),
+        )
+        return {**result, "persisted": True, "diagnostics": diagnosis}
+
+    @router.post(
+        "/digital-twin/causal-studies",
+        response_model=TwinResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _run_twin_causal_study(
+        request: Request,
+        body: TwinCausalStudyRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        if not s.use_db and body.evidence_class not in {"synthetic", "replay"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Observed causal claims require database-backed evidence.",
+            )
+        tenant_id = _twin_tenant(_auth, body.tenant_id, _auth.tenant_id or "t-001")
+        result = estimate_causal_uplift(
+            [item.model_dump(mode="json") for item in body.observations],
+            evidence_class=body.evidence_class,
+            estimand=body.estimand,
+        )
+        if not s.use_db:
+            return {"persisted": False, **result}
+        return {
+            "persisted": True,
+            **persist_causal_study(
+                tenant_id,
+                body.station_id,
+                result,
+                _auth.subject,
+                _tenant_scope(_auth),
+            ),
+        }
+
+    @router.post(
+        "/digital-twin/calibrations",
+        response_model=TwinResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _calibrate_twin(
+        request: Request,
+        body: TwinCalibrationRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == body.station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}")
+        tenant_id = _twin_tenant(_auth, body.tenant_id, station.tenant_id)
+        if not s.use_db and body.evidence_class not in {"synthetic", "replay"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Observed calibration requires database-backed evidence.",
+            )
+        try:
+            result = calibrate_twin_model(
+                body.predicted,
+                body.observed,
+                evidence_class=body.evidence_class,
+                model_scope=body.model_scope,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        if not s.use_db:
+            return {"persisted": False, **result}
+        return {
+            "persisted": True,
+            **persist_calibration(
+                tenant_id,
+                body.station_id,
+                body.model_version,
+                result,
+                _auth.subject,
+                _tenant_scope(_auth),
+            ),
+        }
+
+    @router.post("/digital-twin/trajectory-comparisons", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _compare_twin_trajectory(
+        request: Request,
+        body: TwinTrajectoryComparisonRequest,
+        _auth: Principal = TwinReadDep,
+    ) -> Any:
+        try:
+            return compare_trajectories(body.predicted, body.observed, fields=tuple(body.fields))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    @router.get("/digital-twin/stations/{station_id}/maintenance", response_model=list[TwinResponse])
+    @limiter.limit(rl)
+    async def _twin_maintenance_queue(
+        request: Request,
+        station_id: str,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = TwinReadDep,
+    ) -> Any:
+        _require_twin_database(s)
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {station_id}")
+        target_tenant = _twin_tenant(_auth, tenant_id, station.tenant_id)
+        return list_maintenance_actions(target_tenant, station_id, _tenant_scope(_auth))
+
+    @router.post("/digital-twin/maintenance/{action_id}/transition", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _transition_twin_maintenance(
+        request: Request,
+        action_id: str,
+        body: TwinMaintenanceTransitionRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        _require_twin_database(s)
+        target_tenant = _twin_tenant(_auth, body.tenant_id, _auth.tenant_id)
+        try:
+            return transition_maintenance_action(
+                target_tenant,
+                action_id,
+                body.status,
+                _auth.subject,
+                assigned_to=body.assigned_to,
+                outcome=body.outcome,
+                scope_tenant_id=_tenant_scope(_auth),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post("/digital-twin/commissioning/fault-injection", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _run_twin_fault_injection(
+        request: Request,
+        body: TwinFaultInjectionRequest,
+        _auth: Principal = TwinApproveDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == body.station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}")
+        tenant_id = _twin_tenant(_auth, body.tenant_id, station.tenant_id)
+        result = run_fault_injection_suite(station)
+        if not s.use_db:
+            return {"persisted": False, **result}
+        evidence = record_qualification_evidence(
+            tenant_id,
+            body.station_id,
+            datetime.now(UTC).date(),
+            "fault_injection",
+            result["qualified"],
+            result,
+            _auth.subject,
+            _tenant_scope(_auth),
+        )
+        return {"persisted": True, **result, "qualification_evidence": evidence}
+
+    @router.post("/digital-twin/optimization", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _run_twin_optimization(
+        request: Request,
+        body: TwinOptimizationRequest,
+        _auth: Principal = TwinWriteDep,
+    ) -> Any:
+        repo = load_repository_from_db(_tenant_scope(_auth))
+        station = next((item for item in repo.stations if item.id == body.station_id), None)
+        if station is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown station_id: {body.station_id}")
+        evidence_class = "synthetic"
+        qualification = {"ready": False, "blockers": ["database_required"]}
+        if s.use_db:
+            tenant_id = _twin_tenant(_auth, None, station.tenant_id)
+            qualification = assess_field_qualification(
+                load_qualification_evidence(tenant_id, body.station_id, _tenant_scope(_auth))
+            )
+            evidence_class = "field_qualified" if qualification["ready"] else "observed"
+        snapshot_payload = build_twin_snapshot(repo, body.station_id, evidence_class=evidence_class)
+        snapshot = snapshot_payload["state"]
+        if body.mode == "auto" and evidence_class != "field_qualified":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "Autonomous dispatch requires field qualification.", "qualification": qualification},
+            )
+        try:
+            derated = twin_aware_station(station, snapshot)
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        twin_repo = replace(
+            repo,
+            stations=tuple(derated if item.id == station.id else item for item in repo.stations),
+        )
+        result = solve_dispatch_optimization(
+            twin_repo,
+            _tenant_scope(_auth),
+            body.station_id,
+            body.horizon_hours,
+            body.objective,
+        )
+        return {
+            **result,
+            "mode": body.mode,
+            "twin_state": snapshot,
+            "qualification": qualification,
+            "safety_gate": {
+                "allowed": body.mode == "recommend" or qualification["ready"],
+                "storage_power_derating": round(derated.storage_power_kw / max(1, station.storage_power_kw), 6),
+                "storage_capacity_derating": round(
+                    derated.storage_capacity_kwh / max(1, station.storage_capacity_kwh), 6
+                ),
+            },
+        }
+
+    @router.post(
+        "/digital-twin/qualification/evidence",
+        response_model=TwinResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _record_twin_qualification(
+        request: Request,
+        body: TwinQualificationEvidenceRequest,
+        _auth: Principal = TwinApproveDep,
+    ) -> Any:
+        _require_twin_database(s)
+        tenant_id = _twin_tenant(_auth, body.tenant_id, _auth.tenant_id or "t-001")
+        result = record_qualification_evidence(
+            tenant_id,
+            body.station_id,
+            body.evidence_date.date(),
+            body.category,
+            body.qualified,
+            body.evidence,
+            _auth.subject,
+            _tenant_scope(_auth),
+        )
+        evidence = load_qualification_evidence(tenant_id, body.station_id, _tenant_scope(_auth))
+        return {**result, "qualification": assess_field_qualification(evidence)}
+
+    @router.get("/digital-twin/qualification", response_model=TwinResponse)
+    @limiter.limit(rl)
+    async def _twin_qualification(
+        request: Request,
+        station_id: str | None = Query(default=None),
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = TwinReadDep,
+    ) -> Any:
+        if not s.use_db:
+            return {
+                "ready": False,
+                "qualified_shadow_days": 0,
+                "blockers": ["database_required", "real_field_evidence_required"],
+            }
+        target_tenant = _twin_tenant(_auth, tenant_id, _auth.tenant_id or "t-001")
+        evidence = load_qualification_evidence(target_tenant, station_id, _tenant_scope(_auth))
+        return {**assess_field_qualification(evidence), "evidence_count": len(evidence)}
 
     @router.get("/dispatch", response_model=DispatchResponse)
     @limiter.limit(rl)
@@ -732,7 +1271,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -783,7 +1322,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
         telemetry_ingested = False
         if normalized.get("kind") == "telemetry":
             payload = {
@@ -1006,7 +1545,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         target_tenant = tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
         try:
             return list_models(target_tenant, _tenant_scope(_auth))
         except PermissionError as exc:
@@ -1017,7 +1556,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     async def _register_model(request: Request, body: ModelRegisterRequest, _auth: Principal = ModelWriteDep) -> Any:
         target_tenant = body.tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
         try:
             return register_model(
                 target_tenant, body.model_dump(exclude={"tenant_id"}), _auth.subject, _tenant_scope(_auth)
@@ -1025,7 +1564,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     @router.post(
         "/models/{model_id}/evaluations",
@@ -1042,7 +1581,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         target_tenant = tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
         try:
             return evaluate_model(model_id, target_tenant, body.model_dump(), _auth.subject, _tenant_scope(_auth))
         except KeyError as exc:
@@ -1050,7 +1589,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     @router.post("/models/{model_id}/promote", response_model=ModelResponse)
     @limiter.limit(rl)
@@ -1062,7 +1601,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         target_tenant = tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
         try:
             return promote_model(model_id, target_tenant, _auth.subject, _tenant_scope(_auth))
         except KeyError as exc:
@@ -1095,7 +1634,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         if not s.use_db:
             return {
@@ -1139,7 +1678,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         if not s.use_db:
             return {"ready": False, "blockers": ["database_required"], "shadow_qualified_days": 0}
@@ -1159,7 +1698,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return run_automation_cycle(
@@ -1169,7 +1708,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 max_orders_per_cycle=s.vpp_max_orders_per_cycle,
             )
         except (ValueError, KeyError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -1187,7 +1726,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return record_trade_fill(
@@ -1256,7 +1795,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         payload = body.model_dump()
         payload["payload"] = body.payload
@@ -1281,11 +1820,11 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         if body.period_end <= body.period_start:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="period_end must be later than period_start"
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="period_end must be later than period_start"
             )
         try:
             return create_settlement_batch(
@@ -1298,7 +1837,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 penalty_rate=body.penalty_rate,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     @router.post(
         "/vpp/trading/settlement-batches/{batch_id}/approve",
@@ -1314,7 +1853,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return approve_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason)
@@ -1339,7 +1878,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return dispute_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason)
@@ -1362,7 +1901,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return resolve_settlement_dispute(
@@ -1387,7 +1926,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return export_settlement_batch(tenant_id, batch_id, _auth.subject, body.format, body.destination)
@@ -1410,7 +1949,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return mark_settlement_paid(tenant_id, batch_id, _auth.subject, body.payment_reference)
@@ -1433,7 +1972,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         try:
             return reverse_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason, body.external_reference)
@@ -1452,7 +1991,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
             )
         return set_circuit_breaker(tenant_id, body.state, body.reason, _auth.subject, body.reset_after)
 

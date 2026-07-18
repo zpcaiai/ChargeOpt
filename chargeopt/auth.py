@@ -45,6 +45,9 @@ ROLE_PERMISSIONS: dict[Role, set[str]] = {
         "task:write",
         "model:write",
         "model:approve",
+        "twin:read",
+        "twin:write",
+        "twin:approve",
     },
     "operator": {
         "station:read",
@@ -59,10 +62,12 @@ ROLE_PERMISSIONS: dict[Role, set[str]] = {
         "device:write",
         "task:write",
         "model:write",
+        "twin:read",
+        "twin:write",
     },
-    "analyst": {"station:read", "dispatch:read", "vpp:read", "audit:read"},
-    "edge_gateway": {"telemetry:write", "device:write", "task:write"},
-    "auditor": {"station:read", "dispatch:read", "vpp:read", "audit:read"},
+    "analyst": {"station:read", "dispatch:read", "vpp:read", "audit:read", "twin:read"},
+    "edge_gateway": {"telemetry:write", "device:write", "task:write", "twin:write"},
+    "auditor": {"station:read", "dispatch:read", "vpp:read", "audit:read", "twin:read"},
 }
 
 

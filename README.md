@@ -26,6 +26,7 @@ ChargeOpt OS is a production-grade control plane for ultra-fast charging, PV-sto
 - Immutable settlement event chain with approval, dispute, export, payment, and reversal workflows
 - SLO incidents, 30-day immutable shadow qualification, dual-worker manifests, and scheduled Neon point-in-time restore drills
 - Persisted revenue-proof snapshots for monthly ROI audit and customer business reviews
+- Versioned charging-station digital twin with asset topology, immutable device historian, quality codes, state estimation, trust gating, electro-thermal/queue simulation, deterministic replay, diagnostics, calibration, maintenance closure, AIPW causal studies, and field qualification
 - **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key/Bearer auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
 
 ## Quick Start (in-memory, no DB)
@@ -116,6 +117,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `012_operational_assurance.sql` – live-market external input gates, incidents, SLO measurements, restore drills, and immutable shadow evidence
 - `013_application_rls_role.sql` – non-owner `chargeopt_app` role with no RLS bypass; every runtime connection assumes this role
 - `014_ingress_receipt_idempotency.sql` – durable protocol-message and edge-receipt idempotency keys
+- `015_digital_twin.sql` – versioned asset graph, device historian, state estimates, model calibration, simulation/replay, diagnostics, maintenance actions, causal evidence, and field qualification
 
 ## Test
 
@@ -151,6 +153,10 @@ GET /api/v1/vpp
 GET /api/v1/vpp/trading/dashboard
 GET /api/v1/vpp/trading/live-readiness
 GET /api/v1/models
+GET /api/v1/digital-twin/stations/{station_id}
+GET /api/v1/digital-twin/stations/{station_id}/topology
+GET /api/v1/digital-twin/stations/{station_id}/maintenance
+GET /api/v1/digital-twin/qualification
 GET /api/v1/roi?capacity_kwh=1200&power_kw=600&capex_per_kwh=1150&vpp=true
 GET /api/v1/revenue-diagnostics?station_id=st-hq-hongqiao
 GET /api/v1/audit?limit=50&offset=0
@@ -171,6 +177,17 @@ POST /api/v1/optimization/runs
 POST /api/v1/models
 POST /api/v1/models/{id}/evaluations
 POST /api/v1/models/{id}/promote
+POST /api/v1/digital-twin/topologies
+POST /api/v1/digital-twin/topologies/{id}/activate
+POST /api/v1/digital-twin/measurements
+POST /api/v1/digital-twin/simulations
+POST /api/v1/digital-twin/calibrations
+POST /api/v1/digital-twin/trajectory-comparisons
+POST /api/v1/digital-twin/causal-studies
+POST /api/v1/digital-twin/optimization
+POST /api/v1/digital-twin/maintenance/{id}/transition
+POST /api/v1/digital-twin/commissioning/fault-injection
+POST /api/v1/digital-twin/qualification/evidence
 POST /api/v1/vpp/settlements
 POST /api/v1/vpp/trading/automation/run
 POST /api/v1/vpp/trading/trades
@@ -232,6 +249,14 @@ The moat metric is not "the algorithm exists"; it is whether ChargeOpt can repea
 - Supports station filtering for a single-site sales review or monthly customer business review.
 
 `POST /api/v1/revenue-diagnostics/runs` persists the same proof payload to PostgreSQL as an auditable evidence snapshot. This is the monthly customer-business-review artifact that turns the product claim into a ledgered ROI case.
+
+The legacy revenue-diagnostics baseline is explicitly labeled an engineering counterfactual. It does not claim causal identification. `/api/v1/digital-twin/causal-studies` implements an actual augmented inverse-propensity weighted estimator with covariate adjustment, overlap checks, confidence intervals, and a deterministic placebo gate; insufficient samples or poor overlap cannot produce an auditable uplift claim.
+
+## Charging-Station Digital Twin
+
+The twin separates immutable device facts from versioned derived state. A station topology models transformers, buses, meters, chargers, connectors, PCS, batteries, PV inverters, sensors, and gateways. Measurements carry source/receive timestamps, normalized units, quality codes, evidence hashes, and idempotency keys. State estimates expose residuals, confidence intervals, a trust score, and an autonomy gate.
+
+The deterministic simulator models battery energy, dynamic conversion efficiency, thermal derating, transformer thermal loading, PV curtailment, and charging queues. Scenario runs, calibration evidence, predicted-versus-realized comparisons, root-cause diagnostics, maintenance actions, and commissioning fault-injection results are persisted with tenant RLS and audit evidence. Autonomous twin-aware optimization remains blocked until state trust is sufficient and the station has real field qualification, including 30 consecutive qualified shadow days.
 
 The optimizer used by `/api/v1/optimization/runs` is `scipy-highs-milp-mpc-v1`. It solves binary charge/discharge exclusivity, SOC dynamics and bounds, transformer limits, ramp limits, demand peak, degradation, service pressure, and terminal VPP reserve as a mixed-integer program. Each run stores solver status, objective, MIP gap, and node count. Production fails closed when the exact solver is unavailable; the labeled discrete fallback is development-only.
 

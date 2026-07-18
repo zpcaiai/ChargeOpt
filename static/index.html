@@ -31,6 +31,7 @@
         <nav class="nav">
           <button class="nav-item active" data-view="cockpit" data-i18n-title="nav.cockpit.title"><span>⌁</span><b data-i18n="nav.cockpit">驾驶舱</b></button>
           <button class="nav-item" data-view="station" data-i18n-title="nav.station.title"><span>▦</span><b data-i18n="nav.station">站点</b></button>
+          <button class="nav-item" data-view="twin" data-i18n-title="nav.twin.title"><span>◎</span><b data-i18n="nav.twin">孪生</b></button>
           <button class="nav-item" data-view="dispatch" data-i18n-title="nav.dispatch.title"><span>⇄</span><b data-i18n="nav.dispatch">调度</b></button>
           <button class="nav-item" data-view="roi" data-i18n-title="nav.roi.title"><span>◍</span><b data-i18n="nav.roi">ROI</b></button>
           <button class="nav-item" data-view="vpp" data-i18n-title="nav.vpp.title"><span>◇</span><b data-i18n="nav.vpp">VPP</b></button>
@@ -145,6 +146,51 @@
             <section class="panel">
               <div class="panel-head"><div><h2 data-i18n="panel.pricing">动态定价</h2><p data-i18n="panel.pricing.desc">推荐的公共服务费调整</p></div></div>
               <div id="pricingList" class="event-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="twin" class="view">
+          <div class="metric-grid compact">
+            <article class="metric"><span data-i18n="twin.trust">孪生可信度</span><strong id="twTrust">--</strong><small id="twHealth">--</small></article>
+            <article class="metric"><span>SOC / SOH</span><strong id="twSoc">--</strong><small id="twSoh">--</small></article>
+            <article class="metric"><span data-i18n="twin.headroom">变压器余量</span><strong id="twHeadroom">--</strong><small>kW</small></article>
+            <article class="metric"><span data-i18n="twin.evidence">证据等级</span><strong id="twEvidence">--</strong><small id="twModel">--</small></article>
+          </div>
+
+          <section class="twin-gate" id="twGate" role="status">
+            <div><strong data-i18n="twin.autoGate">自动控制门</strong><p id="twGateText">--</p></div>
+            <span id="twGateStatus" class="status-pill">--</span>
+          </section>
+
+          <div class="layout two-one">
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2 data-i18n="twin.topology">设备拓扑</h2><p data-i18n="twin.topologyDesc">站点电气关系、设备容量与通信控制边界</p></div>
+                <span id="twTopologyStatus" class="status-pill">--</span>
+              </div>
+              <div id="twTopology" class="twin-topology"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="twin.diagnostics">诊断事件</h2><p data-i18n="twin.diagnosticsDesc">基于拓扑、残差和约束传播的根因排序</p></div></div>
+              <div id="twDiagnostics" class="event-list"></div>
+            </section>
+          </div>
+
+          <div class="layout station-layout">
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="twin.trajectory">物理轨迹</h2><p data-i18n="twin.trajectoryDesc">负荷、光伏、储能与变压器约束的确定性仿真</p></div><span id="twSimulationStatus" class="status-pill">--</span></div>
+              <div id="twTrajectory" class="chart"></div>
+              <div id="twSimulationMetrics" class="dispatch-meta twin-metrics"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="twin.scenario">场景实验</h2><p data-i18n="twin.scenarioDesc">在隔离仿真中调整负荷和储能动作</p></div></div>
+              <div class="controls">
+                <label><span data-i18n="twin.loadMultiplier">负荷倍率</span><input id="twLoadMultiplier" type="number" min="0.5" max="1.8" step="0.05" value="1.1" /></label>
+                <label><span data-i18n="twin.storageCommand">储能指令 kW</span><input id="twStorageCommand" type="number" min="-1200" max="1200" step="50" value="-200" /></label>
+                <label><span data-i18n="twin.horizon">仿真步数</span><input id="twHorizon" type="number" min="4" max="96" step="4" value="24" /></label>
+                <button id="twRunSimulation" class="primary-button" type="button" data-i18n="twin.run">运行仿真</button>
+              </div>
             </section>
           </div>
         </section>
