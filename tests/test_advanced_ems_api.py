@@ -66,6 +66,7 @@ async def test_ems_dispatch_returns_risk_evidence_but_cannot_execute(client):
         "/api/v1/ems/dispatch-runs",
         json={
             "station_id": "st-hq-hongqiao",
+            "history_kw": [900 + (index % 6) * 20 for index in range(48)],
             "horizon": 6,
             "interval_minutes": 60,
             "scenario_count": 6,
@@ -78,7 +79,7 @@ async def test_ems_dispatch_returns_risk_evidence_but_cannot_execute(client):
     assert payload["exact"] is True
     assert payload["execution_authorized"] is False
     assert payload["risk"]["cvar_cost"] >= payload["risk"]["var_cost"]
-    assert payload["forecast_evidence"]["evidence_class"] == "synthetic"
+    assert payload["forecast_evidence"]["evidence_class"] == "replay"
     assert len(payload["dispatch_plan"]) == 6
 
 
