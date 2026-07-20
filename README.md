@@ -81,6 +81,8 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 | `ENVIRONMENT` | `development` | `development` \| `staging` \| `production` |
 | `DATABASE_URL` | _(blank)_ | PostgreSQL DSN; blank = in-memory mode |
 | `API_KEY` | _(blank)_ | Shared secret for `X-API-Key`; production also supports `/api/v1/auth/login` bearer sessions |
+| `INITIAL_ADMIN_TOKEN` | falls back to `API_KEY` | One-time deployment key for creating the first tenant administrator |
+| `BOOTSTRAP_TENANT_ID` | `t-001` | Existing tenant eligible for one-time administrator initialization |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per-IP request cap |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warning` \| `error` |
@@ -212,7 +214,7 @@ GET  /api/cron/assurance
 Error responses conform to **RFC 7807** (`application/problem+json`).  
 Production endpoints require either a valid `Authorization: Bearer <token>` from `/api/v1/auth/login` or a valid `X-API-Key`.
 
-Migration `008` disables the public bootstrap credential and revokes its sessions. Provision or rotate an administrator interactively with `DATABASE_URL=... python scripts/manage_user.py --email <email> --tenant-id <tenant> --role tenant_admin`; passwords are never accepted as command-line arguments or stored in the repository.
+Migration `008` disables the public bootstrap credential and revokes its sessions. On first production access, select **首次访问**, then use `INITIAL_ADMIN_TOKEN` (or the `API_KEY` fallback) to create the first tenant administrator. The endpoint is transaction-locked and closes permanently for that tenant after an administrator exists. Administrators can also be provisioned interactively with `DATABASE_URL=... python scripts/manage_user.py --email <email> --tenant-id <tenant> --role tenant_admin`; passwords are never accepted as command-line arguments or stored in the repository.
 
 ## CI/CD (GitHub Actions)
 
@@ -236,6 +238,7 @@ Operational assurance additionally requires `CHARGEOPT_PRODUCTION_URL` and `CRON
 - GitHub Actions runs `python scripts/migrate.py` before production deployment so Neon tables are created/updated automatically on `main` pushes.
 - Set `DATABASE_URL` in both Vercel Production environment variables and GitHub Actions secrets. Vercel uses it at runtime; GitHub Actions uses it to apply migrations before deployment.
 - Set `API_KEY` in production for machine-to-machine access, or use `/api/v1/auth/login` for human/operator access.
+- Set a random `INITIAL_ADMIN_TOKEN` of at least 32 characters in Vercel Production. Open the production URL, choose **首次访问**, create the administrator, and then remove or rotate this token; the database gate still rejects repeat initialization.
 - Set the same `CRON_SECRET` in Vercel Production and GitHub, then set `VPP_AUTOMATION_ENABLED=true`. GitHub is the fallback scheduler; `deploy/k8s/vpp-workers.yaml` runs two lease-safe workers for stricter availability.
 - Keep a connection in `sandbox` mode during qualification. Live mode remains blocked until market certificate status, trading qualification, device credential attestation, secret-backed gateway credentials, and 30 consecutive qualified shadow days are all present.
 - Install the field package with `pip install '.[edge]'`, configure `config/edge.example.json`, and run `chargeopt-edge --config /etc/chargeopt/edge.json`. Certificates and vendor credentials remain in the site secret store.

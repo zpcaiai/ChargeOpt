@@ -6,25 +6,15 @@ import argparse
 import getpass
 import os
 import secrets
-import string
 from collections.abc import Sequence
 
 import psycopg
 
-from chargeopt.auth import ROLE_PERMISSIONS, hash_password
+from chargeopt.auth import ROLE_PERMISSIONS, hash_password, validate_password_strength
 
 
 def validate_password(password: str) -> None:
-    checks = (
-        (len(password) >= 16, "at least 16 characters"),
-        (any(char.islower() for char in password), "a lowercase letter"),
-        (any(char.isupper() for char in password), "an uppercase letter"),
-        (any(char.isdigit() for char in password), "a digit"),
-        (any(char in string.punctuation for char in password), "a symbol"),
-    )
-    missing = [description for passed, description in checks if not passed]
-    if missing:
-        raise ValueError("Password must contain " + ", ".join(missing) + ".")
+    validate_password_strength(password)
 
 
 def _parser() -> argparse.ArgumentParser:

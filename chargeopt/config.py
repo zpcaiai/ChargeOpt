@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # ── Security ──────────────────────────────────────────────────────────────
     api_key: str | None = None
     api_key_header: str = "X-API-Key"
+    initial_admin_token: str | None = None
+    bootstrap_tenant_id: str = "t-001"
     cron_secret: str | None = None
     market_webhook_secret: str | None = None
     cors_origins: str = "*"
@@ -78,6 +80,10 @@ class Settings(BaseSettings):
     @property
     def use_db(self) -> bool:
         return bool(self.database_url)
+
+    @property
+    def initial_admin_secret(self) -> str | None:
+        return self.initial_admin_token or self.api_key
 
     @property
     def is_serverless(self) -> bool:

@@ -17,6 +17,18 @@
         <label><span data-i18n="login.password">密码</span><input id="loginPassword" type="password" autocomplete="current-password" minlength="8" required /></label>
         <p id="loginError" class="form-error" role="alert"></p>
         <button class="primary-button" type="submit" data-i18n="login.submit">登录</button>
+        <button id="showBootstrap" class="secondary-button" type="button" data-i18n="bootstrap.open">首次访问</button>
+      </form>
+      <form id="bootstrapForm" class="login-panel" hidden>
+        <div class="brand login-brand"><span class="brand-mark">CO</span><div><strong>ChargeOpt OS</strong><span>VPP Trading Control</span></div></div>
+        <div><h1 data-i18n="bootstrap.title">初始化管理员</h1><p data-i18n="bootstrap.desc">使用部署密钥创建首个租户管理员</p></div>
+        <label><span data-i18n="bootstrap.name">姓名</span><input id="bootstrapName" type="text" autocomplete="name" minlength="2" required /></label>
+        <label><span data-i18n="login.email">邮箱</span><input id="bootstrapEmail" type="email" autocomplete="username" required /></label>
+        <label><span data-i18n="bootstrap.password">强密码</span><input id="bootstrapPassword" type="password" autocomplete="new-password" minlength="16" required /></label>
+        <label><span data-i18n="bootstrap.key">部署密钥</span><input id="bootstrapKey" type="password" autocomplete="off" minlength="16" required /></label>
+        <p id="bootstrapError" class="form-error" role="alert"></p>
+        <button class="primary-button" type="submit" data-i18n="bootstrap.submit">创建并登录</button>
+        <button id="showLogin" class="secondary-button" type="button" data-i18n="bootstrap.back">返回登录</button>
       </form>
     </div>
     <div class="app-shell">

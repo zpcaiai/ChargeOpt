@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import string
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -107,6 +108,19 @@ def hash_password(password: str, salt: str) -> str:
 
 def verify_password(password: str, salt: str, password_hash: str) -> bool:
     return hmac.compare_digest(hash_password(password, salt), password_hash)
+
+
+def validate_password_strength(password: str) -> None:
+    checks = (
+        (len(password) >= 16, "at least 16 characters"),
+        (any(char.islower() for char in password), "a lowercase letter"),
+        (any(char.isupper() for char in password), "an uppercase letter"),
+        (any(char.isdigit() for char in password), "a digit"),
+        (any(char in string.punctuation for char in password), "a symbol"),
+    )
+    missing = [description for passed, description in checks if not passed]
+    if missing:
+        raise ValueError("Password must contain " + ", ".join(missing) + ".")
 
 
 def new_session_token() -> str:

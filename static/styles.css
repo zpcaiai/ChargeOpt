@@ -71,6 +71,16 @@ body {
   cursor: pointer;
 }
 
+.secondary-button {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .form-error {
   min-height: 20px;
   color: var(--red);

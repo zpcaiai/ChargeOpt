@@ -284,6 +284,19 @@ class LoginResponse(BaseModel):
     principal: PrincipalOut
 
 
+class BootstrapAdminRequest(BaseModel):
+    display_name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=3, max_length=240)
+    password: str = Field(min_length=16, max_length=200)
+    setup_key: str = Field(min_length=16, max_length=512)
+
+
+class BootstrapStatusResponse(BaseModel):
+    available: bool
+    initialized: bool
+    configured: bool
+
+
 # ---------------------------------------------------------------------------
 # Write-path request/response models
 # ---------------------------------------------------------------------------

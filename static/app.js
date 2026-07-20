@@ -13,6 +13,7 @@ const state = {
   selectedStationId: null,
   lang: localStorage.getItem("lang") || "zh",
   token: sessionStorage.getItem("chargeoptToken"),
+  bootstrapStatus: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -33,6 +34,7 @@ const TRANSLATIONS = {
     "header.title": "能源调度运营中心", "header.loading": "加载中...",
     "btn.refresh": "刷新数据", "btn.logout": "退出登录",
     "login.title": "安全登录", "login.desc": "使用租户运营账号进入自动交易控制台", "login.email": "邮箱", "login.password": "密码", "login.submit": "登录",
+    "bootstrap.open": "首次访问", "bootstrap.title": "初始化管理员", "bootstrap.desc": "使用部署密钥创建首个租户管理员", "bootstrap.name": "姓名", "bootstrap.password": "强密码", "bootstrap.key": "部署密钥", "bootstrap.submit": "创建并登录", "bootstrap.back": "返回登录",
     "metric.health": "组合健康度", "metric.health.unit": "评分",
     "metric.revenue": "今日收入",
     "metric.margin": "毛利润",
@@ -91,6 +93,7 @@ const TRANSLATIONS = {
     "header.title": "Energy Dispatch Operations", "header.loading": "Loading portfolio...",
     "btn.refresh": "Refresh data", "btn.logout": "Sign out",
     "login.title": "Secure sign in", "login.desc": "Use your tenant operator account to open the trading control plane", "login.email": "Email", "login.password": "Password", "login.submit": "Sign in",
+    "bootstrap.open": "First access", "bootstrap.title": "Initialize administrator", "bootstrap.desc": "Use the deployment key to create the first tenant administrator", "bootstrap.name": "Name", "bootstrap.password": "Strong password", "bootstrap.key": "Deployment key", "bootstrap.submit": "Create and sign in", "bootstrap.back": "Back to sign in",
     "metric.health": "Portfolio Health", "metric.health.unit": "score",
     "metric.revenue": "Today Revenue",
     "metric.margin": "Gross Margin",
@@ -814,6 +817,31 @@ function setView(id) {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === id));
 }
 
+function setAuthView(view) {
+  $("loginForm").hidden = view !== "login";
+  $("bootstrapForm").hidden = view !== "bootstrap";
+  $("loginError").textContent = "";
+  $("bootstrapError").textContent = "";
+}
+
+async function refreshBootstrapStatus() {
+  try {
+    state.bootstrapStatus = await api("/api/auth/bootstrap-status");
+    $("showBootstrap").hidden = state.bootstrapStatus.initialized;
+  } catch (error) {
+    state.bootstrapStatus = null;
+    $("showBootstrap").hidden = false;
+  }
+}
+
+async function completeLogin(result) {
+  state.token = result.access_token;
+  sessionStorage.setItem("chargeoptToken", state.token);
+  $("loginScreen").hidden = true;
+  setAuthView("login");
+  await loadAll();
+}
+
 applyLang();
 document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => setView(item.dataset.view)));
 $("langToggle").addEventListener("click", toggleLang);
@@ -822,7 +850,18 @@ $("logoutButton").addEventListener("click", () => {
   sessionStorage.removeItem("chargeoptToken");
   state.token = null;
   $("loginScreen").hidden = false;
+  setAuthView("login");
+  refreshBootstrapStatus();
 });
+$("showBootstrap").addEventListener("click", () => {
+  setAuthView("bootstrap");
+  if (state.bootstrapStatus && !state.bootstrapStatus.configured) {
+    $("bootstrapError").textContent = state.lang === "zh"
+      ? "请先在 Vercel 配置 INITIAL_ADMIN_TOKEN。"
+      : "Configure INITIAL_ADMIN_TOKEN in Vercel first.";
+  }
+});
+$("showLogin").addEventListener("click", () => setAuthView("login"));
 $("loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("loginError").textContent = "";
@@ -831,13 +870,33 @@ $("loginForm").addEventListener("submit", async (event) => {
       method: "POST",
       body: JSON.stringify({ email: $("loginEmail").value, password: $("loginPassword").value }),
     });
-    state.token = result.access_token;
-    sessionStorage.setItem("chargeoptToken", state.token);
     $("loginPassword").value = "";
-    $("loginScreen").hidden = true;
-    await loadAll();
+    await completeLogin(result);
   } catch (error) {
     $("loginError").textContent = state.lang === "zh" ? "登录失败，请检查账号和密码。" : "Sign in failed. Check your credentials.";
+  }
+});
+$("bootstrapForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("bootstrapError").textContent = "";
+  try {
+    const result = await api("/api/auth/bootstrap-admin", {
+      method: "POST",
+      body: JSON.stringify({
+        display_name: $("bootstrapName").value,
+        email: $("bootstrapEmail").value,
+        password: $("bootstrapPassword").value,
+        setup_key: $("bootstrapKey").value,
+      }),
+    });
+    $("bootstrapPassword").value = "";
+    $("bootstrapKey").value = "";
+    await completeLogin(result);
+  } catch (error) {
+    $("bootstrapKey").value = "";
+    $("bootstrapError").textContent = state.lang === "zh"
+      ? "初始化失败，请检查部署密钥、密码规则或管理员状态。"
+      : "Initialization failed. Check the deployment key, password policy, or administrator state.";
   }
 });
 $("stationSelect").addEventListener("change", async (event) => {
@@ -876,6 +935,8 @@ async function bootstrap() {
   } catch (error) {
     if (error.code === 401) {
       $("loginScreen").hidden = false;
+      setAuthView("login");
+      await refreshBootstrapStatus();
       return;
     }
     const msg = state.lang === "zh" ? "ChargeOpt OS 加载失败" : "ChargeOpt OS failed to load";

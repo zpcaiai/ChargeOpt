@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 import time
 from datetime import datetime
 from threading import Lock
 from uuid import uuid4
 
-from .auth import Principal, hash_token, new_session_token, session_expiry, verify_password
+from .auth import Principal, hash_password, hash_token, new_session_token, session_expiry, verify_password
 from .config import get_settings
 from .data import Repository, load_repository
 from .db import get_connection
@@ -626,6 +627,87 @@ def persist_roi_simulation(
 # ---------------------------------------------------------------------------
 # Auth, protocol, task, approval, optimization, and settlement operations
 # ---------------------------------------------------------------------------
+
+
+def tenant_admin_bootstrap_status(tenant_id: str) -> dict[str, bool]:
+    with get_connection() as conn:
+        _set_tenant_context(conn, "*")
+        tenant_exists = conn.execute("SELECT 1 FROM chargeopt.tenants WHERE id = %s", (tenant_id,)).fetchone()
+        if tenant_exists is None:
+            raise LookupError("Bootstrap tenant is not configured.")
+        initialized = conn.execute(
+            """
+            SELECT 1
+            FROM chargeopt.users
+            WHERE tenant_id = %s AND active = true AND role IN ('tenant_admin', 'platform_admin')
+            LIMIT 1
+            """,
+            (tenant_id,),
+        ).fetchone()
+    return {"initialized": initialized is not None}
+
+
+def bootstrap_tenant_admin(tenant_id: str, email: str, display_name: str, password: str) -> str:
+    normalized_email = email.strip().lower()
+    with get_connection() as conn, conn.transaction():
+        _set_tenant_context(conn, "*")
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"chargeopt-bootstrap:{tenant_id}",))
+        tenant_exists = conn.execute("SELECT 1 FROM chargeopt.tenants WHERE id = %s", (tenant_id,)).fetchone()
+        if tenant_exists is None:
+            raise LookupError("Bootstrap tenant is not configured.")
+        initialized = conn.execute(
+            """
+            SELECT 1
+            FROM chargeopt.users
+            WHERE tenant_id = %s AND active = true AND role IN ('tenant_admin', 'platform_admin')
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (tenant_id,),
+        ).fetchone()
+        if initialized is not None:
+            raise FileExistsError("The initial administrator has already been created.")
+        existing = conn.execute(
+            "SELECT id, active FROM chargeopt.users WHERE lower(email) = lower(%s) FOR UPDATE",
+            (normalized_email,),
+        ).fetchone()
+        if existing is not None and bool(existing[1]):
+            raise ValueError("This email address is already active.")
+
+        user_id = str(existing[0]) if existing is not None else f"usr-{secrets.token_hex(16)}"
+        salt = secrets.token_hex(16)
+        password_hash = hash_password(password, salt)
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO chargeopt.users (
+                    id, tenant_id, email, display_name, role, password_salt, password_hash, active
+                ) VALUES (%s,%s,%s,%s,'tenant_admin',%s,%s,true)
+                """,
+                (user_id, tenant_id, normalized_email, display_name.strip(), salt, password_hash),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE chargeopt.users
+                SET tenant_id=%s, email=%s, display_name=%s, role='tenant_admin',
+                    password_salt=%s, password_hash=%s, active=true
+                WHERE id=%s
+                """,
+                (tenant_id, normalized_email, display_name.strip(), salt, password_hash, user_id),
+            )
+        conn.execute(
+            "UPDATE chargeopt.sessions SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL",
+            (user_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
+            VALUES (%s, %s, now(), %s, 'auth.bootstrap_admin', %s, 'Initial tenant administrator created.')
+            """,
+            (f"au-{uuid4().hex}", tenant_id, normalized_email, user_id),
+        )
+    return user_id
 
 
 def authenticate_user(email: str, password: str) -> dict[str, object]:

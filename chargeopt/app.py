@@ -44,7 +44,14 @@ from .advanced_ems import (
 )
 from .advanced_ems_repository import list_ems_evidence, persist_ems_evidence
 from .analytics import build_dispatch, build_overview, build_vpp, simulate_roi, station_detail, station_summary
-from .auth import ROLE_PERMISSIONS, Principal, development_principal, has_permission, static_api_key_principal
+from .auth import (
+    ROLE_PERMISSIONS,
+    Principal,
+    development_principal,
+    has_permission,
+    static_api_key_principal,
+    validate_password_strength,
+)
 from .config import get_settings
 from .db import close_pool, health_check, init_pool
 from .digital_twin import (
@@ -115,6 +122,7 @@ from .protocols import normalize_protocol_message
 from .repository import (
     acknowledge_alert,
     authenticate_user,
+    bootstrap_tenant_admin,
     claim_next_task,
     complete_task,
     enqueue_task,
@@ -131,6 +139,7 @@ from .repository import (
     request_dispatch_approval,
     review_dispatch_approval,
     settle_vpp_event,
+    tenant_admin_bootstrap_status,
     update_dispatch_status,
 )
 from .revenue_intelligence import build_revenue_diagnostics
@@ -138,6 +147,8 @@ from .schemas import (
     AlertAcknowledgeRequest,
     AlertAcknowledgeResponse,
     AuditResponse,
+    BootstrapAdminRequest,
+    BootstrapStatusResponse,
     CircuitBreakerRequest,
     CircuitBreakerResponse,
     DispatchApprovalRequest,
@@ -764,6 +775,55 @@ def _build_v1_router(s: Any) -> APIRouter:
             result = authenticate_user(body.email, body.password)
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        principal = result["principal"]
+        return {
+            "access_token": result["access_token"],
+            "token_type": "bearer",
+            "expires_at": result["expires_at"],
+            "principal": _principal_out(principal),
+        }
+
+    @router.get("/auth/bootstrap-status", response_model=BootstrapStatusResponse)
+    @limiter.limit(rl)
+    async def _bootstrap_status(request: Request) -> Any:
+        settings = get_settings()
+        configured = settings.initial_admin_secret is not None
+        if not settings.use_db:
+            return {"available": False, "initialized": False, "configured": configured}
+        try:
+            state = tenant_admin_bootstrap_status(settings.bootstrap_tenant_id)
+        except (LookupError, RuntimeError):
+            return {"available": False, "initialized": False, "configured": configured}
+        initialized = bool(state["initialized"])
+        return {"available": configured and not initialized, "initialized": initialized, "configured": configured}
+
+    @router.post("/auth/bootstrap-admin", response_model=LoginResponse, status_code=status.HTTP_201_CREATED)
+    @limiter.limit("30/hour")
+    async def _bootstrap_admin(request: Request, body: BootstrapAdminRequest) -> Any:
+        settings = get_settings()
+        expected = settings.initial_admin_secret
+        provided = body.setup_key
+        if expected is None or not hmac.compare_digest(provided.encode(), expected.encode()):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid deployment setup key.")
+        if not settings.use_db:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is not configured.")
+        try:
+            validate_password_strength(body.password)
+            bootstrap_tenant_admin(
+                settings.bootstrap_tenant_id,
+                body.email,
+                body.display_name,
+                body.password,
+            )
+            result = authenticate_user(body.email, body.password)
+        except FileExistsError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         principal = result["principal"]
