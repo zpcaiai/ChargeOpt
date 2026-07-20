@@ -276,8 +276,14 @@ The `/api/v1/ems/*` surface adds replayable, risk-aware decision support without
 - `POST /ems/network-projections` projects proposed station load through a radial, phase-decoupled LinDistFlow model with line, transformer, power-factor, and voltage limits. This result is deliberately marked `ac_certified=false`; a venue/site-specific AC study remains an external commissioning input.
 - `POST /ems/portfolio-coordination` uses bounded consensus ADMM to allocate a portfolio target while preserving local resource bounds and recording primal/dual convergence evidence.
 - `POST /ems/offline-policy/evaluations` trains conservative linear fitted-Q models only from safe transitions, rejects out-of-distribution states, and projects actions into hard physical bounds. These outputs are always `shadow_advisory_only` and never authorize field control.
+- `POST /ems/flexibility-envelopes` converts individual arrival/departure windows, delivered energy, efficiency, and connector limits into exact cumulative charging-energy bounds, a latest-feasible baseline, and auditable up/down flexibility.
+- `POST /ems/security-constrained-dispatch-runs` jointly optimizes deadline-constrained EV charging, battery SOC and exclusivity, energy, demand, carbon, upward/downward reserve, scenario CVaR, reserve sustainment, and contingency-derated transformer limits. Hard safety constraints are never relaxed; optional feasibility restoration may expose only customer-energy shortfall.
+- `POST /ems/network-security-assessments` screens every supplied interval against credible transformer derates, line derates, and radial line outages. Loss of load or any required curtailment fails the N-1 certificate, and the result remains explicitly non-AC-certified.
+- `POST /ems/battery-degradation-assessments` produces replayable rainflow cycle, electrothermal stress, calendar aging, throughput, life-loss, and cost evidence. It is an engineering planning model, not a vendor warranty certificate.
 
 With PostgreSQL enabled, every run is written to the immutable `ems_evidence_runs` ledger with tenant RLS, an idempotency key, full algorithm version, evidence class, canonical input hash, request/result payloads, actor, and audit entry. Without PostgreSQL, responses are explicitly labeled transient and are not represented as persisted evidence.
+
+The production algorithm selection and evidence boundaries are documented in [`docs/grid-ems-algorithms.md`](docs/grid-ems-algorithms.md). The system deliberately uses optimization and physical safety projection as the autonomous decision core; safe/physics-informed RL remains a shadow challenger until site-specific offline evaluation and field qualification are complete.
 
 ## Unattended VPP Trading
 

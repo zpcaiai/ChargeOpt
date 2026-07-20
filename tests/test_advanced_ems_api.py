@@ -15,6 +15,8 @@ async def test_ems_capabilities_are_explicit_about_control_boundary(client):
     assert payload["field_control_available"] is False
     assert payload["control_mode"] == "recommendation_and_shadow_only"
     assert "forecast" in payload["algorithms"]
+    assert "secure_dispatch" in payload["algorithms"]
+    assert "network_security" in payload["algorithms"]
     assert "external AC study required" in payload["network_certificate_scope"]
 
 
@@ -149,6 +151,112 @@ async def test_ems_network_and_portfolio_validate_tenant_station_ids(client):
 
 
 @pytest.mark.asyncio
+async def test_grid_ems_endpoints_preserve_evidence_and_control_boundaries(client):
+    session = {
+        "session_id": "vehicle-001",
+        "arrival_step": 0,
+        "departure_step": 4,
+        "required_energy_kwh": 120,
+        "max_charge_kw": 80,
+        "efficiency": 0.95,
+    }
+    flexibility = await client.post(
+        "/api/v1/ems/flexibility-envelopes",
+        json={
+            "station_id": "st-hq-hongqiao",
+            "sessions": [session],
+            "horizon": 6,
+            "interval_minutes": 60,
+            "idempotency_key": "flexibility-api-test-001",
+        },
+    )
+    assert flexibility.status_code == 201, flexibility.text
+    assert flexibility.json()["feasible"] is True
+    assert flexibility.json()["execution_authorized"] is False
+
+    secure_dispatch = await client.post(
+        "/api/v1/ems/security-constrained-dispatch-runs",
+        json={
+            "station_id": "st-hq-hongqiao",
+            "history_kw": [900 + (index % 6) * 20 for index in range(48)],
+            "horizon": 6,
+            "interval_minutes": 60,
+            "scenario_count": 6,
+            "sessions": [session],
+            "prices": [0.4, 0.4, 0.8, 1.2, 0.8, 0.4],
+            "carbon_intensity_kg_per_kwh": [0.5] * 6,
+            "carbon_price_per_kg": 0.1,
+            "reserve_up_prices": [0.02] * 6,
+            "reserve_down_prices": [0.01] * 6,
+            "contingencies": [{"id": "transformer-n1", "available_capacity_ratio": 0.8}],
+            "initial_soc": 0.6,
+            "idempotency_key": "secure-dispatch-api-test-001",
+        },
+    )
+    assert secure_dispatch.status_code == 201, secure_dispatch.text
+    dispatch_payload = secure_dispatch.json()
+    assert dispatch_payload["service_feasible"] is True
+    assert dispatch_payload["safety_constraints_relaxed"] is False
+    assert dispatch_payload["execution_authorized"] is False
+
+    network = {
+        "root_bus": "grid",
+        "transformer_limit_kw": 300,
+        "minimum_voltage_pu": 0.94,
+        "voltage_kv": 0.4,
+        "lines": [
+            {
+                "id": "line-a",
+                "from_bus": "grid",
+                "to_bus": "hq",
+                "phase": "A",
+                "limit_kw": 100,
+                "resistance_ohm": 0.005,
+                "reactance_ohm": 0.003,
+            }
+        ],
+    }
+    security = await client.post(
+        "/api/v1/ems/network-security-assessments",
+        json={
+            "tenant_id": "t-001",
+            "network": network,
+            "intervals": [
+                {
+                    "proposals": [
+                        {
+                            "station_id": "st-hq-hongqiao",
+                            "bus": "hq",
+                            "phase": "A",
+                            "proposed_kw": 80,
+                        }
+                    ]
+                }
+            ],
+            "contingencies": [{"id": "line-n1", "type": "line_outage", "line_id": "line-a"}],
+            "idempotency_key": "network-security-api-test-001",
+        },
+    )
+    assert security.status_code == 201, security.text
+    assert security.json()["n_minus_one_secure"] is False
+    assert security.json()["ac_certified"] is False
+
+    degradation = await client.post(
+        "/api/v1/ems/battery-degradation-assessments",
+        json={
+            "station_id": "st-hq-hongqiao",
+            "soc_series": [0.5, 0.8, 0.3, 0.7, 0.5],
+            "temperature_c": 35,
+            "interval_minutes": 15,
+            "idempotency_key": "degradation-api-test-001",
+        },
+    )
+    assert degradation.status_code == 201, degradation.text
+    assert degradation.json()["estimated_degradation_cost"] > 0
+    assert degradation.json()["evidence"]["persisted"] is False
+
+
+@pytest.mark.asyncio
 async def test_ems_write_is_denied_to_read_only_analyst():
     app = create_app(use_lifespan=False)
     app.dependency_overrides[resolve_principal] = lambda: Principal(
@@ -180,6 +288,12 @@ def test_advanced_ems_migration_is_immutable_and_fail_closed():
     assert "NULLIF(current_setting('chargeopt.tenant_id', true), '') IS NOT NULL" in sql
     assert "BEFORE UPDATE OR DELETE" in sql
     assert "UNIQUE (tenant_id, evidence_type, idempotency_key)" in sql
+
+    grid_sql = (Path(__file__).resolve().parents[1] / "migrations" / "017_grid_ems.sql").read_text()
+    assert "security_constrained_dispatch" in grid_sql
+    assert "battery_degradation_assessment" in grid_sql
+    assert "FORCE ROW LEVEL SECURITY" in grid_sql
+    assert "BEFORE UPDATE OR DELETE" in grid_sql
 
 
 def test_advanced_ems_operations_ui_has_stable_controls_and_render_paths():

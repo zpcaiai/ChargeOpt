@@ -558,6 +558,65 @@ class EmsOfflinePolicyRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=300)
 
 
+class EmsEvSession(BaseModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    arrival_step: int = Field(default=0, ge=0, le=671)
+    departure_step: int = Field(ge=1, le=672)
+    required_energy_kwh: float = Field(ge=0, le=5000)
+    delivered_energy_kwh: float = Field(default=0, ge=0, le=5000)
+    max_charge_kw: float = Field(gt=0, le=2000)
+    efficiency: float = Field(default=0.94, ge=0.8, le=1)
+
+
+class EmsFlexibilityRequest(BaseModel):
+    station_id: str
+    sessions: list[EmsEvSession] = Field(min_length=1, max_length=10000)
+    horizon: int = Field(default=24, ge=1, le=672)
+    interval_minutes: Literal[5, 15, 30, 60] = 15
+    evidence_class: Literal["synthetic", "replay", "shadow", "observed"] = "replay"
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class EmsSecureDispatchRequest(EmsForecastRequest):
+    sessions: list[EmsEvSession] = Field(min_length=1, max_length=250)
+    prices: list[float] = Field(min_length=1, max_length=168)
+    initial_soc: float | None = Field(default=None, gt=0, le=1)
+    soh: float = Field(default=0.95, gt=0, le=1)
+    temperature_c: float = Field(default=25, ge=-30, le=90)
+    carbon_intensity_kg_per_kwh: list[float] | None = Field(default=None, min_length=1, max_length=168)
+    carbon_price_per_kg: float = Field(default=0, ge=0, le=10000)
+    reserve_up_prices: list[float] | None = Field(default=None, min_length=1, max_length=168)
+    reserve_down_prices: list[float] | None = Field(default=None, min_length=1, max_length=168)
+    reserve_duration_minutes: int = Field(default=15, ge=1, le=240)
+    contingencies: list[dict[str, Any]] = Field(default_factory=list, max_length=256)
+    risk_alpha: float = Field(default=0.95, gt=0.5, lt=1)
+    risk_weight: float = Field(default=0.25, ge=0, le=1000)
+    demand_charge_per_kw: float = Field(default=0, ge=0)
+    reserve_soc: float = Field(default=0.3, ge=0.2, le=0.92)
+    allow_service_restoration: bool = True
+
+
+class EmsNetworkSecurityRequest(BaseModel):
+    tenant_id: str | None = None
+    station_id: str | None = None
+    network: dict[str, Any]
+    intervals: list[dict[str, Any]] = Field(min_length=1, max_length=672)
+    contingencies: list[dict[str, Any]] = Field(min_length=1, max_length=256)
+    evidence_class: Literal["synthetic", "replay", "shadow", "observed"] = "replay"
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class EmsBatteryDegradationRequest(BaseModel):
+    station_id: str
+    soc_series: list[float] = Field(min_length=3, max_length=100000)
+    temperature_c: float | list[float] = 25
+    interval_minutes: Literal[5, 15, 30, 60] = 15
+    soh: float = Field(default=0.95, gt=0, le=1)
+    replacement_cost: float | None = Field(default=None, ge=0)
+    evidence_class: Literal["synthetic", "replay", "shadow", "observed"] = "replay"
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
 class EmsResponse(BaseModel):
     model_config = {"extra": "allow"}
 
