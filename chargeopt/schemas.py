@@ -386,7 +386,23 @@ class RevenueProofRunResponse(RevenueDiagnosticResponse):
 # ---------------------------------------------------------------------------
 
 
-ProtocolName = Literal["ocpp", "modbus", "mqtt"]
+ProtocolName = Literal[
+    "ocpp",
+    "ocpp16",
+    "ocpp201",
+    "ocpp21",
+    "iso15118",
+    "modbus",
+    "modbus_tcp",
+    "modbus_rtu",
+    "mqtt",
+    "bacnet_ip",
+    "opc_ua",
+    "iec61850",
+    "iec104",
+    "dlt645",
+    "cjt188",
+]
 
 
 class ProtocolMessageRequest(BaseModel):
@@ -985,6 +1001,43 @@ class TwinQualificationEvidenceRequest(BaseModel):
 
 
 class TwinResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
+# Shared charging, storage, campus, and energy-management platform
+# ---------------------------------------------------------------------------
+
+
+class EnergyTopologyCreateRequest(BaseModel):
+    tenant_id: str | None = None
+    name: str = Field(min_length=1, max_length=240)
+    assets: list[dict[str, Any]] = Field(min_length=1, max_length=20000)
+    relationships: list[dict[str, Any]] = Field(default_factory=list, max_length=60000)
+    points: list[dict[str, Any]] = Field(default_factory=list, max_length=100000)
+    constraints: list[dict[str, Any]] = Field(default_factory=list, max_length=100000)
+
+
+class EnergyDriverProfileRequest(BaseModel):
+    tenant_id: str | None = None
+    name: str = Field(min_length=1, max_length=240)
+    protocol: str = Field(min_length=2, max_length=32)
+    version: str = Field(min_length=1, max_length=80)
+    security_profile: dict[str, Any]
+    transport_profile: dict[str, Any] = Field(default_factory=dict)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    mappings: list[dict[str, Any]] = Field(min_length=1, max_length=10000)
+
+
+class EnergyComputationRequest(BaseModel):
+    tenant_id: str | None = None
+    scope_id: str | None = Field(default=None, max_length=240)
+    evidence_class: EvidenceClass = "observed"
+    idempotency_key: str = Field(min_length=4, max_length=300)
+    payload: dict[str, Any]
+
+
+class EnergyResponse(BaseModel):
     model_config = {"extra": "allow"}
 
 

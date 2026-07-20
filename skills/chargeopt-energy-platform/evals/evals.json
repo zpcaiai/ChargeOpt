@@ -1,0 +1,23 @@
+{
+  "skill_name": "chargeopt-energy-platform",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "审计 ChargeOpt 当前能力，并从充电站、储能、园区 EMS 清单中选择下一批应该完整实现的工作。",
+      "expected_output": "A repository-grounded capability matrix, earliest incomplete dependency-complete batch, vertical implementation plan, acceptance tests, and external gates.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "把 ChargeOpt 一步一步扩展成完整园区综合能源优化平台，先做第一批并验证。",
+      "expected_output": "Implementation starts at shared domain/data contracts, preserves current behavior, includes migration/RLS/API/tests/docs, and does not jump directly to UI or autonomous control.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "确认整个能源平台是不是已经工业级完成并可以无人值守上线。",
+      "expected_output": "Evidence-bounded audit separating code, shadow, and field qualification, with explicit vendor, utility, market, commissioning, and elapsed-time gates.",
+      "files": []
+    }
+  ]
+}

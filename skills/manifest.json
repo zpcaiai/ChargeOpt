@@ -1,0 +1,73 @@
+{
+  "suite": "chargeopt-energy-platform",
+  "version": 1,
+  "skills": [
+    {
+      "name": "chargeopt-energy-domain",
+      "phase": 1,
+      "dependencies": []
+    },
+    {
+      "name": "chargeopt-edge-interoperability",
+      "phase": 1,
+      "dependencies": ["chargeopt-energy-domain"]
+    },
+    {
+      "name": "chargeopt-energy-data",
+      "phase": 1,
+      "dependencies": ["chargeopt-energy-domain", "chargeopt-edge-interoperability"]
+    },
+    {
+      "name": "chargeopt-charging-ems",
+      "phase": 2,
+      "dependencies": ["chargeopt-energy-domain", "chargeopt-edge-interoperability", "chargeopt-energy-data"]
+    },
+    {
+      "name": "chargeopt-storage-ems",
+      "phase": 2,
+      "dependencies": ["chargeopt-energy-domain", "chargeopt-edge-interoperability", "chargeopt-energy-data"]
+    },
+    {
+      "name": "chargeopt-campus-ems",
+      "phase": 2,
+      "dependencies": ["chargeopt-energy-domain", "chargeopt-edge-interoperability", "chargeopt-energy-data"]
+    },
+    {
+      "name": "chargeopt-energy-optimization",
+      "phase": 3,
+      "dependencies": ["chargeopt-charging-ems", "chargeopt-storage-ems", "chargeopt-campus-ems"]
+    },
+    {
+      "name": "chargeopt-digital-twin",
+      "phase": 3,
+      "external": true,
+      "dependencies": ["chargeopt-energy-data", "chargeopt-energy-optimization"]
+    },
+    {
+      "name": "chargeopt-energy-mv",
+      "phase": 3,
+      "dependencies": ["chargeopt-energy-data", "chargeopt-energy-optimization"]
+    },
+    {
+      "name": "chargeopt-flexibility-market",
+      "phase": 4,
+      "dependencies": ["chargeopt-charging-ems", "chargeopt-storage-ems", "chargeopt-energy-optimization", "chargeopt-energy-mv"]
+    },
+    {
+      "name": "chargeopt-operations-ux",
+      "phase": 5,
+      "dependencies": ["chargeopt-campus-ems", "chargeopt-digital-twin", "chargeopt-energy-mv", "chargeopt-flexibility-market"]
+    },
+    {
+      "name": "chargeopt-industrial-assurance",
+      "phase": 6,
+      "dependencies": ["chargeopt-operations-ux", "chargeopt-flexibility-market"]
+    },
+    {
+      "name": "chargeopt-energy-platform",
+      "phase": 0,
+      "orchestrator": true,
+      "dependencies": []
+    }
+  ]
+}

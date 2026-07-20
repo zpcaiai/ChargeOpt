@@ -1,0 +1,4 @@
+interface:
+  display_name: "ChargeOpt Energy Platform"
+  short_description: "Orchestrate the complete charging, storage, and campus EMS program"
+  default_prompt: "Use $chargeopt-energy-platform to select and implement the earliest incomplete ChargeOpt energy-platform batch."

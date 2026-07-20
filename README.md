@@ -31,6 +31,7 @@ ChargeOpt OS is a production-grade control plane for ultra-fast charging, PV-sto
 - Persisted revenue-proof snapshots for monthly ROI audit and customer business reviews
 - Versioned charging-station digital twin with asset topology, immutable device historian, quality codes, state estimation, trust gating, electro-thermal/queue simulation, deterministic replay, diagnostics, calibration, maintenance closure, AIPW causal studies, and field qualification
 - **Production additions:** PostgreSQL persistence, pydantic-based config, structured JSON logs, Prometheus `/metrics`, `/health` probe, API-Key/Bearer auth, CORS, per-IP rate limiting, request-ID propagation, Docker + compose, CI/CD pipeline
+- Shared P0-P3 energy platform: versioned park/building/utility topology, seven energy carriers, protocol-neutral point catalog and constraints, industrial driver mappings, immutable historian quality, charging/storage/campus control evidence, multi-energy MILP planning, ISO 50001-style baselines/EnPIs, bill reconstruction, allocation, M&V, carbon, and reports
 
 ## Quick Start (in-memory, no DB)
 
@@ -120,6 +121,7 @@ Migrations are idempotent SQL files in `migrations/`:
 - `009_reliable_vpp_operations.sql` – leased transactional outbox, reconciliation evidence, operational heartbeats, stale task recovery, and default-deny RLS policies
 - `010_mlops_registry.sql` – model artifacts, data lineage, evaluation evidence, active-version uniqueness, and maker-checker lifecycle state
 - `011_settlement_workflow.sql` – immutable settlement events/lines, disputes, exports, payments, and reversal adjustments
+- `018_energy_platform_p0_p3.sql` – shared park/building/utility topology, protocol mappings, energy historian and quality, charging/storage/campus operations, multi-timescale plans, and ISO 50001/M&V evidence
 - `012_operational_assurance.sql` – live-market external input gates, incidents, SLO measurements, restore drills, and immutable shadow evidence
 - `013_application_rls_role.sql` – non-owner `chargeopt_app` role with no RLS bypass; every runtime connection assumes this role
 - `014_ingress_receipt_idempotency.sql` – durable protocol-message and edge-receipt idempotency keys
@@ -284,6 +286,21 @@ The `/api/v1/ems/*` surface adds replayable, risk-aware decision support without
 With PostgreSQL enabled, every run is written to the immutable `ems_evidence_runs` ledger with tenant RLS, an idempotency key, full algorithm version, evidence class, canonical input hash, request/result payloads, actor, and audit entry. Without PostgreSQL, responses are explicitly labeled transient and are not represented as persisted evidence.
 
 The production algorithm selection and evidence boundaries are documented in [`docs/grid-ems-algorithms.md`](docs/grid-ems-algorithms.md). The system deliberately uses optimization and physical safety projection as the autonomous decision core; safe/physics-informed RL remains a shadow challenger until site-specific offline evaluation and field qualification are complete.
+
+## Shared Energy Platform (P0-P3)
+
+`/api/v1/energy-platform/*` extends the charging-station control plane without breaking the existing station APIs:
+
+- `topologies/validate`, `topologies`, and `topologies/{id}/activate` manage versioned mixed charging, storage, building, electrical, thermal, process, and utility graphs. Draft or invalid graphs cannot drive control.
+- `drivers/validate` checks OCPP 1.6/2.0.1/2.1, ISO 15118, Modbus, MQTT, BACnet/IP, OPC UA, IEC 61850/104, DL/T 645, and CJ/T 188 mappings for mutual identity, certificate rotation, address uniqueness, and write allowlists.
+- `quality/evaluate` detects missing, stale, frozen, range, spike, drift, clock, duplicate, reverse-flow, multiplier, reset, rollover, and source-disagreement conditions without mutating raw evidence.
+- `reconciliation`, `charging/power-sharing`, and `storage/safety-envelope` close meter balance, deadline-aware charging, V2G authorization, SOE/SOP, thermal/imbalance, fire, cooling, trust, and warranty gates.
+- `campus/optimize` and `plans/{day_ahead|intraday|realtime}` solve carrier-coupled equipment commitment with capacity, minimum-load, ramp, demand, conversion efficiency, energy price, carbon, and deterministic safe fallback.
+- `baselines`, `enpis/evaluate`, `bills/reconstruct`, `allocations`, `mv/results`, and `carbon/calculate` provide the ISO 50001 and commercial evidence workflow. Engineering evidence is never promoted to revenue-grade proof without qualified meters and preserved service outcomes.
+
+Migration `018_energy_platform_p0_p3.sql` adds forced-RLS tables for topology, points, constraints, driver versions, device identity, firmware, edge HA/offline evidence, historian data, charging sessions/reservations/reliability, storage state/safety, campus requirements, plans, baselines, EnPIs, bills, allocation, ISO management programs, objectives/actions, M&V, carbon, and immutable reports.
+
+The code is vendor- and venue-ready, not field-qualified by assertion. Real device profiles, certificates, point-to-point records, protection studies, meter acceptance, and elapsed shadow evidence remain mandatory external commissioning inputs.
 
 ## Unattended VPP Trading
 

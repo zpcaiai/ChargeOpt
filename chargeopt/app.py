@@ -76,6 +76,29 @@ from .digital_twin_repository import (
     record_qualification_evidence,
     transition_maintenance_action,
 )
+from .energy_platform import (
+    allocate_charging_power,
+    allocate_energy_cost,
+    calculate_carbon,
+    calculate_mv_result,
+    derive_storage_safety_envelope,
+    evaluate_enpi,
+    evaluate_series_quality,
+    fit_energy_baseline,
+    optimize_campus_energy,
+    platform_capabilities,
+    reconcile_energy_balance,
+    reconstruct_utility_bill,
+    validate_driver_profile,
+    validate_energy_topology,
+)
+from .energy_platform_repository import (
+    activate_energy_topology,
+    create_energy_topology,
+    energy_management_dashboard,
+    get_energy_topology,
+    persist_energy_evidence,
+)
 from .grid_ems import (
     GRID_EMS_ALGORITHMS,
     aggregate_ev_flexibility,
@@ -135,6 +158,10 @@ from .schemas import (
     EmsOfflinePolicyRequest,
     EmsResponse,
     EmsSecureDispatchRequest,
+    EnergyComputationRequest,
+    EnergyDriverProfileRequest,
+    EnergyResponse,
+    EnergyTopologyCreateRequest,
     HealthResponse,
     LoginRequest,
     LoginResponse,
@@ -480,6 +507,9 @@ TwinWriteDep = Depends(require_write_permission("twin:write"))
 TwinApproveDep = Depends(require_write_permission("twin:approve"))
 EmsReadDep = Depends(require_permission("ems:read"))
 EmsWriteDep = Depends(require_write_permission("ems:write"))
+EnergyReadDep = Depends(require_permission("energy:read"))
+EnergyWriteDep = Depends(require_write_permission("energy:write"))
+EnergyApproveDep = Depends(require_write_permission("energy:approve"))
 AuditReadDep = Depends(require_permission("audit:read"))
 
 
@@ -632,6 +662,53 @@ def _build_v1_router(s: Any) -> APIRouter:
         if not principal.is_platform_admin and tenant_id != principal.tenant_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant EMS access is denied.")
         return tenant_id
+
+    def _energy_target_tenant(principal: Principal, requested: str | None = None) -> str:
+        tenant_id = requested or principal.tenant_id
+        if tenant_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="tenant_id is required for a platform-wide principal.",
+            )
+        if not principal.is_platform_admin and tenant_id != principal.tenant_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant energy access is denied.")
+        return tenant_id
+
+    def _energy_result(
+        principal: Principal,
+        body: EnergyComputationRequest,
+        evidence_type: str,
+        computation: Any,
+    ) -> dict[str, Any]:
+        target_tenant = _energy_target_tenant(principal, body.tenant_id)
+        try:
+            result = computation(body.payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        result["evidence_class"] = body.evidence_class
+        if not s.use_db:
+            return result | {
+                "evidence": {"id": None, "persisted": False, "replayed": False, "reason": "database_disabled"}
+            }
+        stored = persist_energy_evidence(
+            target_tenant,
+            evidence_type,
+            result,
+            body.idempotency_key,
+            principal.subject,
+            scope_id=body.scope_id,
+            evidence_class=body.evidence_class,
+        )
+        return result | {
+            "evidence": {
+                "id": stored["id"],
+                "persisted": True,
+                "replayed": stored["replayed"],
+                "created_at": stored["created_at"],
+            }
+        }
 
     def _ems_station(repo: Any, station_id: str) -> Any:
         station = next((item for item in repo.stations if item.id == station_id), None)
@@ -2159,6 +2236,195 @@ def _build_v1_router(s: Any) -> APIRouter:
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    @router.get("/energy-platform/capabilities", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_capabilities(request: Request, _auth: Principal = EnergyReadDep) -> Any:
+        return platform_capabilities()
+
+    @router.get("/energy-platform/dashboard", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_dashboard(
+        request: Request,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = EnergyReadDep,
+    ) -> Any:
+        target_tenant = _energy_target_tenant(_auth, tenant_id)
+        if not s.use_db:
+            return {
+                "generated_at": datetime.now(UTC).isoformat(),
+                "topology": None,
+                "assets": {},
+                "evidence": {},
+                "open_quality_events": {},
+                "bill_exceptions": {"count": 0, "amount": 0},
+                "projects": {},
+                "persistence_enabled": False,
+            }
+        return energy_management_dashboard(target_tenant) | {"persistence_enabled": True}
+
+    @router.post("/energy-platform/topologies/validate", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _validate_energy_topology(
+        request: Request,
+        body: EnergyTopologyCreateRequest,
+        _auth: Principal = EnergyWriteDep,
+    ) -> Any:
+        _energy_target_tenant(_auth, body.tenant_id)
+        return validate_energy_topology(body.model_dump(exclude={"tenant_id"}))
+
+    @router.post(
+        "/energy-platform/topologies",
+        response_model=EnergyResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    @limiter.limit(rl)
+    async def _create_energy_topology(
+        request: Request,
+        body: EnergyTopologyCreateRequest,
+        _auth: Principal = EnergyWriteDep,
+    ) -> Any:
+        target_tenant = _energy_target_tenant(_auth, body.tenant_id)
+        if not s.use_db:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DATABASE_URL is required.")
+        try:
+            return create_energy_topology(target_tenant, body.model_dump(exclude={"tenant_id"}), _auth.subject)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    @router.get("/energy-platform/topologies/{topology_id}", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _get_energy_topology(
+        request: Request,
+        topology_id: str,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = EnergyReadDep,
+    ) -> Any:
+        target_tenant = _energy_target_tenant(_auth, tenant_id)
+        if not s.use_db:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DATABASE_URL is required.")
+        try:
+            return get_energy_topology(target_tenant, topology_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @router.post("/energy-platform/topologies/{topology_id}/activate", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _activate_energy_topology(
+        request: Request,
+        topology_id: str,
+        tenant_id: str | None = Query(default=None),
+        _auth: Principal = EnergyApproveDep,
+    ) -> Any:
+        target_tenant = _energy_target_tenant(_auth, tenant_id)
+        if not s.use_db:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DATABASE_URL is required.")
+        try:
+            return activate_energy_topology(target_tenant, topology_id, _auth.subject)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @router.post("/energy-platform/drivers/validate", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _validate_energy_driver(
+        request: Request,
+        body: EnergyDriverProfileRequest,
+        _auth: Principal = EnergyWriteDep,
+    ) -> Any:
+        _energy_target_tenant(_auth, body.tenant_id)
+        return validate_driver_profile(body.model_dump(exclude={"tenant_id"}))
+
+    @router.post("/energy-platform/quality/evaluate", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _evaluate_energy_quality(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(
+            _auth,
+            body,
+            "quality",
+            lambda payload: evaluate_series_quality(payload.get("samples") or [], payload.get("rules")),
+        )
+
+    @router.post("/energy-platform/reconciliation", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _reconcile_energy(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "reconciliation", reconcile_energy_balance)
+
+    @router.post("/energy-platform/charging/power-sharing", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _charging_power_sharing(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "charging_plan", allocate_charging_power)
+
+    @router.post("/energy-platform/storage/safety-envelope", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _storage_safety_envelope(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "storage_state", derive_storage_safety_envelope)
+
+    @router.post("/energy-platform/campus/optimize", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _campus_optimize(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "campus_plan", optimize_campus_energy)
+
+    @router.post("/energy-platform/plans/{timescale}", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _multi_timescale_plan(
+        request: Request,
+        timescale: str,
+        body: EnergyComputationRequest,
+        _auth: Principal = EnergyWriteDep,
+    ) -> Any:
+        if timescale not in {"day_ahead", "intraday", "realtime"}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid planning timescale")
+        payload = body.payload | {"timescale": timescale}
+        plan_body = body.model_copy(update={"payload": payload})
+        return _energy_result(_auth, plan_body, "multitimescale_plan", optimize_campus_energy)
+
+    @router.post("/energy-platform/baselines", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_baseline(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "baseline", fit_energy_baseline)
+
+    @router.post("/energy-platform/enpis/evaluate", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_enpi(request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep) -> Any:
+        return _energy_result(_auth, body, "report", evaluate_enpi)
+
+    @router.post("/energy-platform/bills/reconstruct", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_bill(request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep) -> Any:
+        return _energy_result(_auth, body, "bill", reconstruct_utility_bill)
+
+    @router.post("/energy-platform/allocations", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_allocation(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "allocation", allocate_energy_cost)
+
+    @router.post("/energy-platform/mv/results", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_mv(request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep) -> Any:
+        return _energy_result(_auth, body, "mv", calculate_mv_result)
+
+    @router.post("/energy-platform/carbon/calculate", response_model=EnergyResponse)
+    @limiter.limit(rl)
+    async def _energy_carbon(
+        request: Request, body: EnergyComputationRequest, _auth: Principal = EnergyWriteDep
+    ) -> Any:
+        return _energy_result(_auth, body, "carbon", calculate_carbon)
 
     @router.get("/models", response_model=list[ModelResponse])
     @limiter.limit(rl)

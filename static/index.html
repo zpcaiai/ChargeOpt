@@ -33,6 +33,7 @@
           <button class="nav-item" data-view="station" data-i18n-title="nav.station.title"><span>▦</span><b data-i18n="nav.station">站点</b></button>
           <button class="nav-item" data-view="twin" data-i18n-title="nav.twin.title"><span>◎</span><b data-i18n="nav.twin">孪生</b></button>
           <button class="nav-item" data-view="dispatch" data-i18n-title="nav.dispatch.title"><span>⇄</span><b data-i18n="nav.dispatch">调度</b></button>
+          <button class="nav-item" data-view="energy" data-i18n-title="nav.energy.title"><span>▤</span><b data-i18n="nav.energy">园区能源</b></button>
           <button class="nav-item" data-view="roi" data-i18n-title="nav.roi.title"><span>◍</span><b data-i18n="nav.roi">ROI</b></button>
           <button class="nav-item" data-view="vpp" data-i18n-title="nav.vpp.title"><span>◇</span><b data-i18n="nav.vpp">VPP</b></button>
           <button class="nav-item" data-view="trading" data-i18n-title="nav.trading.title"><span>¥</span><b data-i18n="nav.trading">交易</b></button>
@@ -245,6 +246,42 @@
                 <article class="metric"><span>IRR</span><strong id="rIrr">--</strong><small data-i18n="roi.irrHint">10年估算</small></article>
               </div>
               <div id="roiBars" class="bar-stack"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="energy" class="view">
+          <div class="metric-grid compact">
+            <article class="metric"><span data-i18n="energy.topology">活动拓扑</span><strong id="enTopology">--</strong><small id="enTopologyVersion">--</small></article>
+            <article class="metric"><span data-i18n="energy.assets">能源资产</span><strong id="enAssets">--</strong><small data-i18n="energy.assetUnit">台/项</small></article>
+            <article class="metric"><span data-i18n="energy.quality">质量事件</span><strong id="enQuality">--</strong><small data-i18n="energy.open">未关闭</small></article>
+            <article class="metric"><span data-i18n="energy.bills">账单差异</span><strong id="enBills">--</strong><small>CNY</small></article>
+          </div>
+          <div class="layout two-one">
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="energy.foundation">统一能源底座</h2><p data-i18n="energy.foundationDesc">资产、载能介质、设备协议与证据状态</p></div><span id="enPersistence" class="status-pill">--</span></div>
+              <div id="enCarriers" class="dispatch-meta"></div>
+              <div class="table-wrap"><table><thead><tr><th data-i18n="energy.phase">阶段</th><th data-i18n="energy.scope">范围</th><th data-i18n="trade.status">状态</th></tr></thead><tbody id="enPhaseRows"></tbody></table></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="energy.protocols">协议与边缘</h2><p data-i18n="energy.protocolsDesc">活动驱动能力与现场资格边界</p></div></div>
+              <div id="enProtocols" class="event-list"></div>
+            </section>
+          </div>
+          <div class="layout station-layout">
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="energy.optimizer">园区多能源计划</h2><p data-i18n="energy.optimizerDesc">日前、日内与实时安全计划</p></div><span id="enPlanStatus" class="status-pill">--</span></div>
+              <div class="controls">
+                <label><span data-i18n="energy.timescale">时间尺度</span><select id="enTimescale"><option value="day_ahead" data-i18n="energy.dayAhead">日前</option><option value="intraday" data-i18n="energy.intraday">日内</option><option value="realtime" data-i18n="energy.realtime">实时</option></select></label>
+                <label><span data-i18n="energy.electricDemand">电负荷 kW</span><input id="enElectricDemand" type="number" min="0" max="100000" step="10" value="1200" /></label>
+                <label><span data-i18n="energy.coolingDemand">冷负荷 kW</span><input id="enCoolingDemand" type="number" min="0" max="100000" step="10" value="680" /></label>
+                <button id="enRunPlan" class="primary-button" type="button" data-i18n="energy.runPlan">生成计划</button>
+              </div>
+              <div id="enPlanResult" class="plan-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2 data-i18n="energy.management">能源绩效</h2><p data-i18n="energy.managementDesc">EnPI、账单、M&V 与碳证据</p></div></div>
+              <div id="enEvidence" class="event-list"></div>
             </section>
           </div>
         </section>

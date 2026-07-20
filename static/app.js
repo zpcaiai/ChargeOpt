@@ -7,6 +7,9 @@ const state = {
   twinSimulation: null,
   emsCapabilities: null,
   emsDispatch: null,
+  energyCapabilities: null,
+  energyDashboard: null,
+  energyPlan: null,
   selectedStationId: null,
   lang: localStorage.getItem("lang") || "zh",
   token: sessionStorage.getItem("chargeoptToken"),
@@ -22,6 +25,7 @@ const TRANSLATIONS = {
     "nav.station": "站点", "nav.station.title": "站点详情",
     "nav.twin": "孪生", "nav.twin.title": "充电站数字孪生",
     "nav.dispatch": "调度", "nav.dispatch.title": "调度中心",
+    "nav.energy": "园区能源", "nav.energy.title": "园区多能源运营",
     "nav.roi": "ROI", "nav.roi.title": "储能ROI模拟",
     "nav.vpp": "VPP", "nav.vpp.title": "VPP资源",
     "nav.trading": "交易", "nav.trading.title": "VPP 自动交易",
@@ -68,12 +72,18 @@ const TRANSLATIONS = {
     "twin.scenario": "场景实验", "twin.scenarioDesc": "在隔离仿真中调整负荷和储能动作",
     "twin.loadMultiplier": "负荷倍率", "twin.storageCommand": "储能指令 kW", "twin.horizon": "仿真步数", "twin.run": "运行仿真",
     "ems.title": "高级能源优化", "ems.desc": "概率预测、DRO-CVaR 调度与电池退化约束", "ems.horizon": "滚动时域", "ems.risk": "CVaR 置信度", "ems.run": "运行风险调度", "ems.recommendation": "仅建议", "ems.expected": "期望成本", "ems.var": "风险价值", "ems.cvar": "尾部风险", "ems.scenarios": "场景", "ems.persisted": "证据已固化", "ems.transient": "临时证据", "ems.running": "求解中", "ems.failed": "风险调度失败",
+    "energy.topology": "活动拓扑", "energy.assets": "能源资产", "energy.assetUnit": "台/项", "energy.quality": "质量事件", "energy.open": "未关闭", "energy.bills": "账单差异",
+    "energy.foundation": "统一能源底座", "energy.foundationDesc": "资产、载能介质、设备协议与证据状态", "energy.phase": "阶段", "energy.scope": "范围",
+    "energy.protocols": "协议与边缘", "energy.protocolsDesc": "活动驱动能力与现场资格边界", "energy.optimizer": "园区多能源计划", "energy.optimizerDesc": "日前、日内与实时安全计划",
+    "energy.timescale": "时间尺度", "energy.dayAhead": "日前", "energy.intraday": "日内", "energy.realtime": "实时", "energy.electricDemand": "电负荷 kW", "energy.coolingDemand": "冷负荷 kW", "energy.runPlan": "生成计划",
+    "energy.management": "能源绩效", "energy.managementDesc": "EnPI、账单、M&V 与碳证据",
   },
   en: {
     "nav.cockpit": "Cockpit", "nav.cockpit.title": "Operating cockpit",
     "nav.station": "Station", "nav.station.title": "Station detail",
     "nav.twin": "Twin", "nav.twin.title": "Charging-station digital twin",
     "nav.dispatch": "Dispatch", "nav.dispatch.title": "Dispatch center",
+    "nav.energy": "Campus", "nav.energy.title": "Campus multi-energy operations",
     "nav.roi": "ROI", "nav.roi.title": "Storage ROI simulator",
     "nav.vpp": "VPP", "nav.vpp.title": "VPP resources",
     "nav.trading": "Trading", "nav.trading.title": "Automated VPP trading",
@@ -120,6 +130,11 @@ const TRANSLATIONS = {
     "twin.scenario": "Scenario lab", "twin.scenarioDesc": "Adjust load and storage actions in an isolated simulation",
     "twin.loadMultiplier": "Load multiplier", "twin.storageCommand": "Storage command kW", "twin.horizon": "Simulation steps", "twin.run": "Run simulation",
     "ems.title": "Advanced energy optimization", "ems.desc": "Probabilistic forecast, DRO-CVaR dispatch, and battery degradation constraints", "ems.horizon": "Rolling horizon", "ems.risk": "CVaR confidence", "ems.run": "Run risk dispatch", "ems.recommendation": "Recommendation only", "ems.expected": "Expected cost", "ems.var": "Value at risk", "ems.cvar": "Tail risk", "ems.scenarios": "Scenarios", "ems.persisted": "Evidence persisted", "ems.transient": "Transient evidence", "ems.running": "Solving", "ems.failed": "Risk dispatch failed",
+    "energy.topology": "Active topology", "energy.assets": "Energy assets", "energy.assetUnit": "items", "energy.quality": "Quality events", "energy.open": "open", "energy.bills": "Bill variance",
+    "energy.foundation": "Shared energy foundation", "energy.foundationDesc": "Assets, carriers, protocols, and evidence state", "energy.phase": "Phase", "energy.scope": "Scope",
+    "energy.protocols": "Protocols and edge", "energy.protocolsDesc": "Driver capabilities and field qualification boundary", "energy.optimizer": "Campus multi-energy plan", "energy.optimizerDesc": "Day-ahead, intraday, and real-time safety plans",
+    "energy.timescale": "Timescale", "energy.dayAhead": "Day-ahead", "energy.intraday": "Intraday", "energy.realtime": "Real-time", "energy.electricDemand": "Electric demand kW", "energy.coolingDemand": "Cooling demand kW", "energy.runPlan": "Generate plan",
+    "energy.management": "Energy performance", "energy.managementDesc": "EnPI, billing, M&V, and carbon evidence",
   },
 };
 
@@ -161,7 +176,7 @@ function toggleLang() {
   state.lang = state.lang === "zh" ? "en" : "zh";
   localStorage.setItem("lang", state.lang);
   applyLang();
-  if (state.overview) { renderOverview(); renderStation(); renderTwin(); renderDispatch(); renderEms(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
+  if (state.overview) { renderOverview(); renderStation(); renderTwin(); renderDispatch(); renderEms(); renderEnergy(); renderRoi(); renderVpp(); renderRevenueProof(); renderTrading(); }
 }
 
 async function api(path, options = {}) {
@@ -187,6 +202,10 @@ async function loadAll() {
   ]);
   state.trading = await api("/api/vpp/trading/dashboard").catch(() => null);
   state.emsCapabilities = await api("/api/ems/capabilities").catch(() => null);
+  [state.energyCapabilities, state.energyDashboard] = await Promise.all([
+    api("/api/energy-platform/capabilities").catch(() => null),
+    api("/api/energy-platform/dashboard").catch(() => null),
+  ]);
   if (!state.selectedStationId) state.selectedStationId = state.overview.stations[0].id;
   [state.stationDetail, state.twin] = await Promise.all([
     api(`/api/stations/${state.selectedStationId}`),
@@ -199,6 +218,7 @@ async function loadAll() {
   renderTwin();
   renderDispatch();
   renderEms();
+  renderEnergy();
   renderRoi();
   renderVpp();
   renderRevenueProof();
@@ -583,6 +603,90 @@ async function runEmsDispatch() {
   }
 }
 
+function renderEnergy() {
+  const capabilities = state.energyCapabilities;
+  const dashboard = state.energyDashboard;
+  if (!capabilities || !dashboard) {
+    $("enTopology").textContent = "--";
+    $("enPlanStatus").textContent = state.lang === "zh" ? "不可用" : "Unavailable";
+    return;
+  }
+  const topology = dashboard.topology;
+  $("enTopology").textContent = topology ? topology.name : (state.lang === "zh" ? "待配置" : "Pending");
+  $("enTopologyVersion").textContent = topology ? `v${topology.version} · ${topology.status}` : "--";
+  $("enAssets").textContent = Object.values(dashboard.assets || {}).reduce((sum, value) => sum + value, 0);
+  $("enQuality").textContent = Object.values(dashboard.open_quality_events || {}).reduce((sum, value) => sum + value, 0);
+  $("enBills").textContent = money(dashboard.bill_exceptions?.amount || 0);
+  $("enPersistence").textContent = dashboard.persistence_enabled
+    ? (state.lang === "zh" ? "证据已持久化" : "Evidence persisted")
+    : (state.lang === "zh" ? "临时模式" : "Transient mode");
+  $("enCarriers").innerHTML = capabilities.energy_carriers.map((carrier) => `<span class="tag">${carrier}</span>`).join("");
+  const phaseScope = {
+    P0: state.lang === "zh" ? "统一模型、协议、数据质量" : "Domain, protocols, data quality",
+    P1: state.lang === "zh" ? "充电与储能闭环" : "Charging and storage closure",
+    P2: state.lang === "zh" ? "园区多能源优化" : "Campus multi-energy optimization",
+    P3: state.lang === "zh" ? "ISO 50001 与 M&V" : "ISO 50001 and M&V",
+  };
+  $("enPhaseRows").innerHTML = Object.entries(capabilities.phases).map(([phase, status]) => `
+    <tr><td><strong>${phase}</strong></td><td>${phaseScope[phase]}</td><td><span class="tag low">${status}</span></td></tr>
+  `).join("");
+  $("enProtocols").innerHTML = capabilities.protocols.map((protocol) => `
+    <div class="event"><strong>${protocol}</strong><p>${state.lang === "zh" ? "驱动契约可用" : "Driver contract available"}</p><small>${state.lang === "zh" ? "现场一致性报告待设备接入" : "Vendor conformance required at commissioning"}</small></div>
+  `).join("");
+  const evidence = dashboard.evidence || {};
+  $("enEvidence").innerHTML = Object.keys(evidence).length ? Object.entries(evidence).map(([type, item]) => `
+    <div class="event"><strong>${type}</strong><p>${item.count} ${state.lang === "zh" ? "条证据" : "evidence records"}</p><small>${item.latest_at ? new Date(item.latest_at).toLocaleString() : "--"}</small></div>
+  `).join("") : `<p>${state.lang === "zh" ? "等待首条园区能源证据" : "Waiting for the first campus energy record"}</p>`;
+  if (!state.energyPlan) {
+    $("enPlanStatus").textContent = state.lang === "zh" ? "仅建议" : "Recommendation only";
+    $("enPlanResult").innerHTML = "";
+    return;
+  }
+  $("enPlanStatus").textContent = state.energyPlan.status;
+  $("enPlanResult").innerHTML = (state.energyPlan.dispatch || []).slice(0, 12).map((item) => `
+    <div class="plan-row"><strong>${item.asset_id} · ${number(item.setpoint, 1)} ${item.unit}</strong><p>${item.output_carrier} · ${item.committed ? (state.lang === "zh" ? "投入" : "on") : (state.lang === "zh" ? "停机" : "off")}</p><small>${state.lang === "zh" ? "步骤" : "step"} ${item.step}</small></div>
+  `).join("");
+}
+
+async function runEnergyPlan() {
+  const button = $("enRunPlan");
+  button.disabled = true;
+  $("enPlanStatus").textContent = state.lang === "zh" ? "求解中" : "Solving";
+  const electric = Number($("enElectricDemand").value);
+  const cooling = Number($("enCoolingDemand").value);
+  const timescale = $("enTimescale").value;
+  const intervalMinutes = timescale === "realtime" ? 5 : timescale === "intraday" ? 15 : 60;
+  const periods = Array.from({ length: timescale === "day_ahead" ? 24 : 8 }, (_, step) => ({
+    at: new Date(Date.now() + step * intervalMinutes * 60000).toISOString(),
+    demand: { electricity: electric * (0.9 + (step % 4) * 0.04), cooling: cooling * (0.92 + (step % 3) * 0.05) },
+    prices: { electricity: step % 4 === 2 ? 1.2 : 0.62, gas: 0.28 },
+  }));
+  try {
+    state.energyPlan = await api(`/api/energy-platform/plans/${timescale}`, {
+      method: "POST",
+      body: JSON.stringify({
+        idempotency_key: `ui-energy-${timescale}-${Date.now()}`,
+        evidence_class: "replay",
+        payload: {
+          interval_minutes: intervalMinutes,
+          periods,
+          carbon_price_per_kg: 0.08,
+          equipment: [
+            { asset_id: "grid-import", output_carrier: "electricity", maximum_output: 3000, variable_cost_per_output: 0, carbon_kg_per_output: 0.57, ramp_limit: 800, unit: "kW" },
+            { asset_id: "chiller-1", input_carrier: "electricity", output_carrier: "cooling", maximum_output: 900, minimum_output: 180, efficiency: 5.4, start_cost: 18, ramp_limit: 300, unit: "kW" },
+            { asset_id: "chiller-2", input_carrier: "electricity", output_carrier: "cooling", maximum_output: 650, minimum_output: 130, efficiency: 4.8, start_cost: 12, ramp_limit: 260, unit: "kW" },
+          ],
+        },
+      }),
+    });
+  } catch (error) {
+    state.energyPlan = { status: "blocked", blockers: [error.message], dispatch: [] };
+  } finally {
+    renderEnergy();
+    button.disabled = false;
+  }
+}
+
 async function renderRoi() {
   const capacity = $("capacityInput").value;
   const power = $("powerInput").value;
@@ -751,6 +855,7 @@ $("stationSelect").addEventListener("change", async (event) => {
 });
 $("twRunSimulation").addEventListener("click", runTwinSimulation);
 $("emsRun").addEventListener("click", runEmsDispatch);
+$("enRunPlan").addEventListener("click", runEnergyPlan);
 ["capacityInput", "powerInput", "capexInput", "vppInput"].forEach((id) => $(id).addEventListener("input", renderRoi));
 window.addEventListener("resize", () => {
   if (state.overview) {

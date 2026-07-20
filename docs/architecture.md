@@ -2,7 +2,7 @@
 
 ## Product Shape
 
-ChargeOpt OS is an AI energy dispatch and revenue optimization platform for ultra-fast charging, PV-storage-charging stations, fleet depots, and VPP aggregators.
+ChargeOpt OS is a shared energy dispatch and revenue optimization platform for ultra-fast charging, battery storage, fleet depots, campuses, industrial parks, microgrids, and VPP aggregators.
 
 The production control plane closes the loop from station economics through market bidding, trade capture, site dispatch, interval metering, imbalance settlement, and auditable revenue proof. Market-specific regulatory certification and credentials remain deployment inputs rather than source-code defaults.
 
@@ -34,6 +34,15 @@ The production control plane closes the loop from station economics through mark
 
 9. Charging-station digital twin
    Versioned asset topology and immutable device measurements feed quality-aware state estimation. The estimated state includes SOC, SOH, transformer headroom, balance residual, confidence intervals, provenance, and a trust score. A deterministic electro-thermal and queue model supports replay and branchable what-if scenarios. Calibration, predicted-versus-realized comparison, topology-aware diagnostics, maintenance actions, AIPW causal studies, and field qualification remain separate evidence layers. Automatic control requires both a trusted state and field-qualified evidence; simulation never writes directly to devices.
+
+10. Shared multi-energy platform
+   A versioned tenant-to-park-to-building/site-to-network-to-device-to-point graph covers electricity, cooling, heating, steam, gas, water, and compressed air. Protocol-neutral points, hard/service/economic constraints, replaceable device bindings, driver versions, raw historian evidence, quality events, aligned intervals, and carrier reconciliation form the common contract consumed by charging, storage, campus optimization, and M&V.
+
+11. Campus and industrial energy
+   Carrier-coupled rolling MILP plans electrical import, chillers, heat pumps, boilers, CHP, pumps, towers, HVAC, compressed air, lighting, flexible loads, and production services at day-ahead, intraday, and real-time horizons. Comfort, process, protection, SOC, thermal, warranty, and local-control boundaries remain hard; failure returns a named local-safe fallback.
+
+12. ISO 50001 and M&V
+   Programs, significant energy uses, baselines, EnPIs, objectives, action plans, utility bills, internal allocation, carbon factors, projects, M&V results, and immutable reports share the same interval data and evidence grades. Weather, occupancy, production, service impact, meter quality, uncertainty, exclusions, and approvals prevent an engineering estimate from being presented as measured savings.
 
 ## Revenue Proof Algorithm
 
