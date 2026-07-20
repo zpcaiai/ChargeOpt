@@ -827,7 +827,7 @@ function setAuthView(view) {
 async function refreshBootstrapStatus() {
   try {
     state.bootstrapStatus = await api("/api/auth/bootstrap-status");
-    $("showBootstrap").hidden = state.bootstrapStatus.initialized;
+    $("showBootstrap").hidden = !state.bootstrapStatus.available;
   } catch (error) {
     state.bootstrapStatus = null;
     $("showBootstrap").hidden = false;
@@ -855,6 +855,11 @@ $("logoutButton").addEventListener("click", () => {
 });
 $("showBootstrap").addEventListener("click", () => {
   setAuthView("bootstrap");
+  if (state.bootstrapStatus?.recovery_available) {
+    $("bootstrapError").textContent = state.lang === "zh"
+      ? "这是一次性管理员恢复，成功后该恢复入口将永久关闭。"
+      : "This is a one-time administrator recovery and closes permanently after success.";
+  }
   if (state.bootstrapStatus && !state.bootstrapStatus.configured) {
     $("bootstrapError").textContent = state.lang === "zh"
       ? "请先在 Vercel 配置 INITIAL_ADMIN_TOKEN。"

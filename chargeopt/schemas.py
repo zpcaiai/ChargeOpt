@@ -295,6 +295,7 @@ class BootstrapStatusResponse(BaseModel):
     available: bool
     initialized: bool
     configured: bool
+    recovery_available: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -647,7 +647,14 @@ def tenant_admin_bootstrap_status(tenant_id: str) -> dict[str, bool]:
     return {"initialized": initialized is not None}
 
 
-def bootstrap_tenant_admin(tenant_id: str, email: str, display_name: str, password: str) -> str:
+def bootstrap_tenant_admin(
+    tenant_id: str,
+    email: str,
+    display_name: str,
+    password: str,
+    *,
+    recovery_id: str | None = None,
+) -> str:
     normalized_email = email.strip().lower()
     with get_connection() as conn, conn.transaction():
         _set_tenant_context(conn, "*")
@@ -665,8 +672,20 @@ def bootstrap_tenant_admin(tenant_id: str, email: str, display_name: str, passwo
             """,
             (tenant_id,),
         ).fetchone()
-        if initialized is not None:
+        if initialized is not None and recovery_id is None:
             raise FileExistsError("The initial administrator has already been created.")
+        if recovery_id is not None:
+            recovered = conn.execute(
+                """
+                SELECT 1 FROM chargeopt.audit_entries
+                WHERE tenant_id = %s AND action = 'auth.recover_admin' AND target = %s
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (tenant_id, recovery_id),
+            ).fetchone()
+            if recovered is not None:
+                raise FileExistsError("This administrator recovery has already been used.")
         existing = conn.execute(
             "SELECT id, active FROM chargeopt.users WHERE lower(email) = lower(%s) FOR UPDATE",
             (normalized_email,),
@@ -700,12 +719,19 @@ def bootstrap_tenant_admin(tenant_id: str, email: str, display_name: str, passwo
             "UPDATE chargeopt.sessions SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL",
             (user_id,),
         )
+        action = "auth.recover_admin" if recovery_id is not None else "auth.bootstrap_admin"
+        audit_target = recovery_id or user_id
+        detail = (
+            f"One-time administrator recovery created user {user_id}."
+            if recovery_id is not None
+            else "Initial tenant administrator created."
+        )
         conn.execute(
             """
             INSERT INTO chargeopt.audit_entries (id, tenant_id, timestamp, actor, action, target, detail)
-            VALUES (%s, %s, now(), %s, 'auth.bootstrap_admin', %s, 'Initial tenant administrator created.')
+            VALUES (%s, %s, now(), %s, %s, %s, %s)
             """,
-            (f"au-{uuid4().hex}", tenant_id, normalized_email, user_id),
+            (f"au-{uuid4().hex}", tenant_id, normalized_email, action, audit_target, detail),
         )
     return user_id
 

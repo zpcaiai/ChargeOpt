@@ -82,6 +82,7 @@ Copy `.env.example` to `.env` and fill in values.  Key variables:
 | `DATABASE_URL` | _(blank)_ | PostgreSQL DSN; blank = in-memory mode |
 | `API_KEY` | _(blank)_ | Shared secret for `X-API-Key`; production also supports `/api/v1/auth/login` bearer sessions |
 | `INITIAL_ADMIN_TOKEN` | falls back to `API_KEY` | One-time deployment key for creating the first tenant administrator |
+| `ADMIN_RECOVERY_ID` | unset | Opaque one-time recovery identifier; set only when all existing administrator credentials are unavailable |
 | `BOOTSTRAP_TENANT_ID` | `t-001` | Existing tenant eligible for one-time administrator initialization |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per-IP request cap |
@@ -239,6 +240,7 @@ Operational assurance additionally requires `CHARGEOPT_PRODUCTION_URL` and `CRON
 - Set `DATABASE_URL` in both Vercel Production environment variables and GitHub Actions secrets. Vercel uses it at runtime; GitHub Actions uses it to apply migrations before deployment.
 - Set `API_KEY` in production for machine-to-machine access, or use `/api/v1/auth/login` for human/operator access.
 - Set a random `INITIAL_ADMIN_TOKEN` of at least 32 characters in Vercel Production. Open the production URL, choose **首次访问**, create the administrator, and then remove or rotate this token; the database gate still rejects repeat initialization.
+- If an administrator exists but every credential is unavailable, set a new random `ADMIN_RECOVERY_ID`. The same form can create one recovery administrator; the identifier is consumed transactionally in the immutable audit log and cannot be reused.
 - Set the same `CRON_SECRET` in Vercel Production and GitHub, then set `VPP_AUTOMATION_ENABLED=true`. GitHub is the fallback scheduler; `deploy/k8s/vpp-workers.yaml` runs two lease-safe workers for stricter availability.
 - Keep a connection in `sandbox` mode during qualification. Live mode remains blocked until market certificate status, trading qualification, device credential attestation, secret-backed gateway credentials, and 30 consecutive qualified shadow days are all present.
 - Install the field package with `pip install '.[edge]'`, configure `config/edge.example.json`, and run `chargeopt-edge --config /etc/chargeopt/edge.json`. Certificates and vendor credentials remain in the site secret store.

@@ -536,7 +536,7 @@ def _worker_tenant_scope(principal: Principal) -> str:
 def _twin_tenant(principal: Principal, requested_tenant: str | None, station_tenant: str | None) -> str:
     target = requested_tenant or principal.tenant_id or station_tenant
     if target is None:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
     if not principal.is_platform_admin and target != principal.tenant_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant access is denied.")
     if station_tenant is not None and target != station_tenant:
@@ -669,7 +669,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = requested or principal.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="tenant_id is required for a platform-wide principal.",
             )
         if not principal.is_platform_admin and tenant_id != principal.tenant_id:
@@ -680,7 +680,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = requested or principal.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="tenant_id is required for a platform-wide principal.",
             )
         if not principal.is_platform_admin and tenant_id != principal.tenant_id:
@@ -697,7 +697,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         try:
             result = computation(body.payload)
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         result["evidence_class"] = body.evidence_class
@@ -791,16 +791,32 @@ def _build_v1_router(s: Any) -> APIRouter:
         settings = get_settings()
         configured = settings.initial_admin_secret is not None
         if not settings.use_db:
-            return {"available": False, "initialized": False, "configured": configured}
+            return {
+                "available": False,
+                "initialized": False,
+                "configured": configured,
+                "recovery_available": False,
+            }
         try:
             state = tenant_admin_bootstrap_status(settings.bootstrap_tenant_id)
         except (LookupError, RuntimeError):
-            return {"available": False, "initialized": False, "configured": configured}
+            return {
+                "available": False,
+                "initialized": False,
+                "configured": configured,
+                "recovery_available": False,
+            }
         initialized = bool(state["initialized"])
-        return {"available": configured and not initialized, "initialized": initialized, "configured": configured}
+        recovery_available = configured and initialized and settings.admin_recovery_id is not None
+        return {
+            "available": configured and (not initialized or recovery_available),
+            "initialized": initialized,
+            "configured": configured,
+            "recovery_available": recovery_available,
+        }
 
     @router.post("/auth/bootstrap-admin", response_model=LoginResponse, status_code=status.HTTP_201_CREATED)
-    @limiter.limit("30/hour")
+    @limiter.limit("120/hour")
     async def _bootstrap_admin(request: Request, body: BootstrapAdminRequest) -> Any:
         settings = get_settings()
         expected = settings.initial_admin_secret
@@ -816,6 +832,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.email,
                 body.display_name,
                 body.password,
+                recovery_id=settings.admin_recovery_id,
             )
             result = authenticate_user(body.email, body.password)
         except FileExistsError as exc:
@@ -924,7 +941,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 _tenant_scope(_auth),
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post("/digital-twin/topologies/{topology_id}/activate", response_model=TwinResponse)
     @limiter.limit(rl)
@@ -1005,7 +1022,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 _tenant_scope(_auth),
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         return {
             "ingest": ingest_result,
             "state": snapshot,
@@ -1033,7 +1050,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         evidence_class = body.evidence_class
         if not s.use_db and evidence_class not in {"synthetic", "replay"}:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="A database-backed evidence trail is required for shadow, observed, or field-qualified simulation.",
             )
         simulation = simulate_station(
@@ -1090,7 +1107,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         if not s.use_db and body.evidence_class not in {"synthetic", "replay"}:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Observed causal claims require database-backed evidence.",
             )
         tenant_id = _twin_tenant(_auth, body.tenant_id, _auth.tenant_id or "t-001")
@@ -1130,7 +1147,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _twin_tenant(_auth, body.tenant_id, station.tenant_id)
         if not s.use_db and body.evidence_class not in {"synthetic", "replay"}:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Observed calibration requires database-backed evidence.",
             )
         try:
@@ -1141,7 +1158,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 model_scope=body.model_scope,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         if not s.use_db:
             return {"persisted": False, **result}
         return {
@@ -1166,7 +1183,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         try:
             return compare_trajectories(body.predicted, body.observed, fields=tuple(body.fields))
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.get("/digital-twin/stations/{station_id}/maintenance", response_model=list[TwinResponse])
     @limiter.limit(rl)
@@ -1498,7 +1515,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -1549,7 +1566,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         telemetry_ingested = False
         if normalized.get("kind") == "telemetry":
             payload = {
@@ -1813,7 +1830,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         }
         if evidence_type is not None and evidence_type not in supported_evidence_types:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Unsupported EMS evidence_type.",
             )
         if not s.use_db:
@@ -1883,7 +1900,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except (ValueError, KeyError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post("/ems/dispatch-runs", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit("12/minute")
@@ -1966,7 +1983,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -1997,7 +2014,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post(
         "/ems/security-constrained-dispatch-runs",
@@ -2083,7 +2100,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -2129,7 +2146,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -2170,7 +2187,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post("/ems/network-projections", response_model=EmsResponse, status_code=status.HTTP_201_CREATED)
     @limiter.limit("20/minute")
@@ -2208,7 +2225,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -2251,7 +2268,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -2297,7 +2314,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 body.idempotency_key,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.get("/energy-platform/capabilities", response_model=EnergyResponse)
     @limiter.limit(rl)
@@ -2352,7 +2369,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         try:
             return create_energy_topology(target_tenant, body.model_dump(exclude={"tenant_id"}), _auth.subject)
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.get("/energy-platform/topologies/{topology_id}", response_model=EnergyResponse)
     @limiter.limit(rl)
@@ -2447,7 +2464,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         _auth: Principal = EnergyWriteDep,
     ) -> Any:
         if timescale not in {"day_ahead", "intraday", "realtime"}:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid planning timescale")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid planning timescale")
         payload = body.payload | {"timescale": timescale}
         plan_body = body.model_copy(update={"payload": payload})
         return _energy_result(_auth, plan_body, "multitimescale_plan", optimize_campus_energy)
@@ -2497,7 +2514,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         target_tenant = tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
         try:
             return list_models(target_tenant, _tenant_scope(_auth))
         except PermissionError as exc:
@@ -2508,7 +2525,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     async def _register_model(request: Request, body: ModelRegisterRequest, _auth: Principal = ModelWriteDep) -> Any:
         target_tenant = body.tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
         try:
             return register_model(
                 target_tenant, body.model_dump(exclude={"tenant_id"}), _auth.subject, _tenant_scope(_auth)
@@ -2516,7 +2533,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post(
         "/models/{model_id}/evaluations",
@@ -2533,7 +2550,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         target_tenant = tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
         try:
             return evaluate_model(model_id, target_tenant, body.model_dump(), _auth.subject, _tenant_scope(_auth))
         except KeyError as exc:
@@ -2541,7 +2558,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post("/models/{model_id}/promote", response_model=ModelResponse)
     @limiter.limit(rl)
@@ -2553,7 +2570,7 @@ def _build_v1_router(s: Any) -> APIRouter:
     ) -> Any:
         target_tenant = tenant_id or _auth.tenant_id
         if target_tenant is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="tenant_id is required")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
         try:
             return promote_model(model_id, target_tenant, _auth.subject, _tenant_scope(_auth))
         except KeyError as exc:
@@ -2586,7 +2603,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         if not s.use_db:
             return {
@@ -2630,7 +2647,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         if not s.use_db:
             return {"ready": False, "blockers": ["database_required"], "shadow_qualified_days": 0}
@@ -2650,7 +2667,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return run_automation_cycle(
@@ -2660,7 +2677,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 max_orders_per_cycle=s.vpp_max_orders_per_cycle,
             )
         except (ValueError, KeyError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -2678,7 +2695,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return record_trade_fill(
@@ -2747,7 +2764,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         payload = body.model_dump()
         payload["payload"] = body.payload
@@ -2772,11 +2789,11 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         if body.period_end <= body.period_start:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="period_end must be later than period_start"
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="period_end must be later than period_start"
             )
         try:
             return create_settlement_batch(
@@ -2789,7 +2806,7 @@ def _build_v1_router(s: Any) -> APIRouter:
                 penalty_rate=body.penalty_rate,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     @router.post(
         "/vpp/trading/settlement-batches/{batch_id}/approve",
@@ -2805,7 +2822,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return approve_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason)
@@ -2830,7 +2847,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return dispute_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason)
@@ -2853,7 +2870,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return resolve_settlement_dispute(
@@ -2878,7 +2895,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return export_settlement_batch(tenant_id, batch_id, _auth.subject, body.format, body.destination)
@@ -2901,7 +2918,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return mark_settlement_paid(tenant_id, batch_id, _auth.subject, body.payment_reference)
@@ -2924,7 +2941,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         try:
             return reverse_settlement_batch(tenant_id, batch_id, _auth.subject, body.reason, body.external_reference)
@@ -2943,7 +2960,7 @@ def _build_v1_router(s: Any) -> APIRouter:
         tenant_id = _auth.tenant_id
         if tenant_id is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A tenant context is required."
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A tenant context is required."
             )
         return set_circuit_breaker(tenant_id, body.state, body.reason, _auth.subject, body.reset_after)
 

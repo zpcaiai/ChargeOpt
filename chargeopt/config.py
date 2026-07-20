@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     api_key: str | None = None
     api_key_header: str = "X-API-Key"
     initial_admin_token: str | None = None
+    admin_recovery_id: str | None = None
     bootstrap_tenant_id: str = "t-001"
     cron_secret: str | None = None
     market_webhook_secret: str | None = None
