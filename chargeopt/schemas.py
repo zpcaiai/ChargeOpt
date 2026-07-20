@@ -1049,6 +1049,7 @@ class EnergyResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "unhealthy"]
     version: str
+    revision: str
     db: str
     pool_available: int | None = None
     pool_size: int | None = None

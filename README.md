@@ -223,9 +223,9 @@ Migration `008` disables the public bootstrap credential and revokes its session
 3. **build** – Docker image build + push to GHCR (`ghcr.io/<owner>/chargeopt`)
 4. **scan** – blocking Trivy high/critical vulnerability scan with SARIF upload
 5. **migrate-neon** – run `python scripts/migrate.py` against Neon using the `DATABASE_URL` GitHub secret
-6. **deploy-vercel** – optional Vercel CLI deploy when `VERCEL_TOKEN` is configured; otherwise Vercel Git integration handles the push deployment
+6. **verify-vercel** – wait for Vercel Git Integration to publish the exact pushed SHA, then require healthy Neon connectivity
 
-Required GitHub secret for automatic schema creation: `DATABASE_URL`. Optional CLI deploy secrets: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`. `DATABASE_URL` is used only inside the migration job and is not stored in the repository. `migrate-neon` fails closed when `DATABASE_URL` is missing so push-to-production schema creation cannot silently skip.
+Required GitHub secret for automatic schema creation: `DATABASE_URL`. `DATABASE_URL` is used only inside the migration job and is not stored in the repository. `migrate-neon` fails closed when `DATABASE_URL` is missing so push-to-production schema creation cannot silently skip. Vercel deployment uses the repository's Git Integration, avoiding a second long-lived CLI token; set the optional `VERCEL_PRODUCTION_URL` repository variable when the canonical production URL changes.
 GHCR push uses the built-in `GITHUB_TOKEN` (no extra secret needed).
 
 Operational assurance additionally requires `CHARGEOPT_PRODUCTION_URL` and `CRON_SECRET`. Weekly point-in-time recovery drills require `NEON_API_KEY`, `NEON_PROJECT_ID`, and optionally `NEON_PARENT_BRANCH_ID`.

@@ -10,6 +10,7 @@ Provides:
 """
 
 import hmac
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -571,7 +572,8 @@ def _register_ops_routes(app: FastAPI, s: Any) -> None:
                 content={"status": "unhealthy", "detail": str(exc)},
             )
         _update_gauges()
-        return {"status": "ok", "version": s.app_version, **db_status}
+        revision = os.getenv("VERCEL_GIT_COMMIT_SHA") or os.getenv("GITHUB_SHA") or "local"
+        return {"status": "ok", "version": s.app_version, "revision": revision, **db_status}
 
     @app.get("/ready", tags=["ops"], response_model=ReadinessResponse, include_in_schema=False)
     async def _ready():

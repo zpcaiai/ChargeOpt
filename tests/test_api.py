@@ -12,6 +12,7 @@ async def test_health_returns_ok(client):
     body = resp.json()
     assert body["status"] == "ok"
     assert "version" in body
+    assert body["revision"]
 
 
 @pytest.mark.asyncio
